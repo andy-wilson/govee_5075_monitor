@@ -1,7 +1,9 @@
 package main
 
 import (
+	"compress/gzip"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -10,6 +12,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -75,6 +79,16 @@ type AuthConfig struct {
 	AllowDefaultKey bool              `json:"allow_default_key"`
 }
 
+// StorageConfig represents configuration for time-based partitioning and retention
+type StorageConfig struct {
+	BaseDir            string        `json:"base_dir"`              // Base storage directory
+	TimePartitioning   bool          `json:"time_partitioning"`     // Enable time-based partitioning
+	PartitionInterval  time.Duration `json:"partition_interval"`    // Interval for new partitions (e.g., 24h, 168h/weekly, 720h/monthly)
+	RetentionPeriod    time.Duration `json:"retention_period"`      // How long to keep data (0 = forever)
+	MaxReadingsPerFile int           `json:"max_readings_per_file"` // Maximum readings per file
+	CompressOldData    bool          `json:"compress_old_data"`     // Compress older partitions
+}
+
 // Server represents the Govee server
 type Server struct {
 	// Maps device address to device status
@@ -91,6 +105,8 @@ type Server struct {
 	config *Config
 	// Authentication configuration
 	auth *AuthConfig
+	// Storage manager
+	storageManager *StorageManager
 }
 
 // Config represents server configuration
@@ -102,16 +118,383 @@ type Config struct {
 	StorageDir         string        `json:"storage_dir"`
 	PersistenceEnabled bool          `json:"persistence_enabled"`
 	SaveInterval       time.Duration `json:"save_interval"`
+	EnableHTTPS        bool          `json:"enable_https"`
+	CertFile           string        `json:"cert_file"`
+	KeyFile            string        `json:"key_file"`
+}
+
+// StorageManager handles reading/writing data with partitioning and retention policies
+type StorageManager struct {
+	config      *StorageConfig
+	mu          sync.RWMutex
+	currentTime time.Time // Used for determining partition boundaries
+}
+
+// NewStorageManager creates a storage manager with the given configuration
+func NewStorageManager(config *StorageConfig) *StorageManager {
+	// Set default values if not specified
+	if config.PartitionInterval == 0 {
+		config.PartitionInterval = 30 * 24 * time.Hour // Default 30 days
+	}
+	if config.MaxReadingsPerFile == 0 {
+		config.MaxReadingsPerFile = 1000 // Default 1000 readings per file
+	}
+
+	return &StorageManager{
+		config:      config,
+		currentTime: time.Now(),
+	}
+}
+
+// getPartitionDirForTime returns the directory path for a specific time
+func (sm *StorageManager) getPartitionDirForTime(t time.Time) string {
+	if !sm.config.TimePartitioning {
+		return sm.config.BaseDir
+	}
+
+	// Format the time into a directory name based on the partitioning interval
+	var format string
+	switch {
+	case sm.config.PartitionInterval <= 24*time.Hour:
+		// Daily partitioning
+		format = "2006-01-02" // YYYY-MM-DD
+	case sm.config.PartitionInterval <= 7*24*time.Hour:
+		// Weekly partitioning
+		year, week := t.ISOWeek()
+		return filepath.Join(sm.config.BaseDir, fmt.Sprintf("%d-W%02d", year, week))
+	default:
+		// Monthly partitioning
+		format = "2006-01" // YYYY-MM
+	}
+
+	return filepath.Join(sm.config.BaseDir, t.Format(format))
+}
+
+// getCurrentPartitionDir returns the directory for the current time period
+func (sm *StorageManager) getCurrentPartitionDir() string {
+	return sm.getPartitionDirForTime(time.Now())
+}
+
+// saveReadings saves readings for a device to the appropriate partition
+func (sm *StorageManager) saveReadings(deviceAddr string, readings []Reading) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	// Get the current partition directory
+	partitionDir := sm.getCurrentPartitionDir()
+
+	// Create partition directory if it doesn't exist
+	if err := os.MkdirAll(partitionDir, 0755); err != nil {
+		return fmt.Errorf("failed to create partition directory: %v", err)
+	}
+
+	// Create the device file path
+	deviceFile := filepath.Join(partitionDir, fmt.Sprintf("readings_%s.json", deviceAddr))
+
+	// Serialize and save the readings
+	readingsData, err := json.MarshalIndent(readings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal readings for device %s: %v", deviceAddr, err)
+	}
+
+	if err := os.WriteFile(deviceFile, readingsData, 0644); err != nil {
+		return fmt.Errorf("failed to save readings for device %s: %v", deviceAddr, err)
+	}
+
+	return nil
+}
+
+// loadReadings loads readings for a specific device across all relevant partitions
+func (sm *StorageManager) loadReadings(deviceAddr string, fromTime, toTime time.Time) ([]Reading, error) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	var allReadings []Reading
+
+	// If not using time partitioning, just load from the base directory
+	if !sm.config.TimePartitioning {
+		deviceFile := filepath.Join(sm.config.BaseDir, fmt.Sprintf("readings_%s.json", deviceAddr))
+		readings, err := sm.loadReadingsFromFile(deviceFile)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+		allReadings = append(allReadings, readings...)
+	} else {
+		// Determine which partitions to check based on the time range
+		startPartition := sm.getPartitionDirForTime(fromTime)
+		endPartition := sm.getPartitionDirForTime(toTime)
+
+		// List all partition directories
+		partitions, err := sm.listPartitionDirs()
+		if err != nil {
+			return nil, err
+		}
+
+		// Load readings from relevant partitions
+		for _, partition := range partitions {
+			// Only include partitions in the time range
+			if (fromTime.IsZero() || partition >= startPartition) &&
+				(toTime.IsZero() || partition <= endPartition) {
+				deviceFile := filepath.Join(partition, fmt.Sprintf("readings_%s.json", deviceAddr))
+				readings, err := sm.loadReadingsFromFile(deviceFile)
+				if err != nil && !os.IsNotExist(err) {
+					return nil, err
+				}
+				allReadings = append(allReadings, readings...)
+			}
+		}
+	}
+
+	// Filter readings by time range if specified
+	if !fromTime.IsZero() || !toTime.IsZero() {
+		var filteredReadings []Reading
+		for _, r := range allReadings {
+			if (fromTime.IsZero() || r.Timestamp.After(fromTime) || r.Timestamp.Equal(fromTime)) &&
+				(toTime.IsZero() || r.Timestamp.Before(toTime) || r.Timestamp.Equal(toTime)) {
+				filteredReadings = append(filteredReadings, r)
+			}
+		}
+		allReadings = filteredReadings
+	}
+
+	// Sort readings by timestamp
+	sort.Slice(allReadings, func(i, j int) bool {
+		return allReadings[i].Timestamp.Before(allReadings[j].Timestamp)
+	})
+
+	return allReadings, nil
+}
+
+// loadReadingsFromFile loads readings from a specific file
+func (sm *StorageManager) loadReadingsFromFile(filePath string) ([]Reading, error) {
+	// Check for compressed file first
+	compressedPath := filePath + ".gz"
+	if _, err := os.Stat(compressedPath); err == nil {
+		// File is compressed, decompress it
+		f, err := os.Open(compressedPath)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+
+		gz, err := gzip.NewReader(f)
+		if err != nil {
+			return nil, err
+		}
+		defer gz.Close()
+
+		data, err := io.ReadAll(gz)
+		if err != nil {
+			return nil, err
+		}
+
+		var readings []Reading
+		if err := json.Unmarshal(data, &readings); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal readings: %v", err)
+		}
+
+		return readings, nil
+	}
+
+	// Try regular file
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	var readings []Reading
+	if err := json.Unmarshal(data, &readings); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal readings: %v", err)
+	}
+
+	return readings, nil
+}
+
+// listPartitionDirs returns a sorted list of all partition directories
+func (sm *StorageManager) listPartitionDirs() ([]string, error) {
+	// If not using time partitioning, just return the base directory
+	if !sm.config.TimePartitioning {
+		return []string{sm.config.BaseDir}, nil
+	}
+
+	// List all directories in the base directory
+	entries, err := os.ReadDir(sm.config.BaseDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read storage directory: %v", err)
+	}
+
+	var partitions []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			partitions = append(partitions, filepath.Join(sm.config.BaseDir, entry.Name()))
+		}
+	}
+
+	// Sort partitions by name (which corresponds to chronological order due to formatting)
+	sort.Strings(partitions)
+
+	return partitions, nil
+}
+
+// enforceRetention enforces the retention policy by removing old partitions
+func (sm *StorageManager) enforceRetention() error {
+	// No retention policy if retention period is 0
+	if sm.config.RetentionPeriod == 0 {
+		return nil
+	}
+
+	// Calculate the cutoff time
+	cutoffTime := time.Now().Add(-sm.config.RetentionPeriod)
+
+	// Get all partition directories
+	partitions, err := sm.listPartitionDirs()
+	if err != nil {
+		return err
+	}
+
+	// Remove partitions older than the retention period
+	for _, partition := range partitions {
+		// Skip if it's the base directory (not a partition)
+		if partition == sm.config.BaseDir {
+			continue
+		}
+
+		// Extract the time from the partition name
+		partitionTime, err := sm.parsePartitionTime(filepath.Base(partition))
+		if err != nil {
+			log.Printf("Warning: Couldn't parse partition time from %s: %v", partition, err)
+			continue
+		}
+
+		// If the partition is older than the cutoff, remove it
+		if partitionTime.Before(cutoffTime) {
+			log.Printf("Removing old partition: %s (older than %s)", partition, cutoffTime.Format("2006-01-02"))
+			if err := os.RemoveAll(partition); err != nil {
+				return fmt.Errorf("failed to remove old partition %s: %v", partition, err)
+			}
+		} else if sm.config.CompressOldData {
+			// Compress old partitions that are within retention but not current
+			currentPartitionDir := sm.getCurrentPartitionDir()
+			if partition != currentPartitionDir && !isCompressed(partition) {
+				if err := sm.compressPartition(partition); err != nil {
+					log.Printf("Warning: Failed to compress partition %s: %v", partition, err)
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// parsePartitionTime parses a time from a partition directory name
+func (sm *StorageManager) parsePartitionTime(partitionName string) (time.Time, error) {
+	// Try different formats based on the partition interval
+
+	if strings.Contains(partitionName, "-W") {
+		// Weekly format: 2023-W01
+		year, week := 0, 0
+		if _, err := fmt.Sscanf(partitionName, "%d-W%02d", &year, &week); err != nil {
+			return time.Time{}, err
+		}
+		// Create a time.Time for the first day of the given week
+		jan1 := time.Date(year, 1, 1, 0, 0, 0, 0, time.UTC)
+		daysSinceJan1 := (week - 1) * 7
+		return jan1.AddDate(0, 0, daysSinceJan1), nil
+	} else if len(partitionName) == 7 {
+		// Monthly format: 2023-01
+		return time.Parse("2006-01", partitionName)
+	} else if len(partitionName) == 10 {
+		// Daily format: 2023-01-01
+		return time.Parse("2006-01-02", partitionName)
+	}
+
+	return time.Time{}, fmt.Errorf("unknown partition format: %s", partitionName)
+}
+
+// isCompressed checks if a partition is already compressed
+func isCompressed(partitionDir string) bool {
+	// Check if there are any .gz files in the directory
+	entries, err := os.ReadDir(partitionDir)
+	if err != nil {
+		return false
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".gz") {
+			return true
+		}
+	}
+
+	return false
+}
+
+// compressPartition compresses all JSON files in a partition
+func (sm *StorageManager) compressPartition(partitionDir string) error {
+	// Get all JSON files in the partition
+	entries, err := os.ReadDir(partitionDir)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
+			filePath := filepath.Join(partitionDir, entry.Name())
+			compressedPath := filePath + ".gz"
+
+			// Skip if already compressed
+			if _, err := os.Stat(compressedPath); err == nil {
+				continue
+			}
+
+			// Open the source file
+			sourceFile, err := os.Open(filePath)
+			if err != nil {
+				return err
+			}
+
+			// Create the compressed file
+			compressedFile, err := os.Create(compressedPath)
+			if err != nil {
+				sourceFile.Close()
+				return err
+			}
+
+			// Create a gzip writer
+			gzipWriter := gzip.NewWriter(compressedFile)
+
+			// Copy data from source to compressed file
+			_, err = io.Copy(gzipWriter, sourceFile)
+
+			// Close all resources
+			gzipWriter.Close()
+			compressedFile.Close()
+			sourceFile.Close()
+
+			if err != nil {
+				return err
+			}
+
+			// Remove the original file
+			if err := os.Remove(filePath); err != nil {
+				return err
+			}
+
+			log.Printf("Compressed file: %s", filePath)
+		}
+	}
+
+	return nil
 }
 
 // NewServer creates a new Govee server instance
-func NewServer(config *Config, auth *AuthConfig) *Server {
+func NewServer(config *Config, auth *AuthConfig, storageManager *StorageManager) *Server {
 	s := &Server{
-		devices:  make(map[string]*DeviceStatus),
-		clients:  make(map[string]*ClientStatus),
-		readings: make(map[string][]Reading),
-		config:   config,
-		auth:     auth,
+		devices:        make(map[string]*DeviceStatus),
+		clients:        make(map[string]*ClientStatus),
+		readings:       make(map[string][]Reading),
+		config:         config,
+		auth:           auth,
+		storageManager: storageManager,
 	}
 
 	// Initialize logging if configured
@@ -187,17 +570,12 @@ func (s *Server) saveData() {
 		}
 	}
 
-	// Save recent readings for each device
+	// Save recent readings for each device using the storage manager
 	for deviceAddr, deviceReadings := range s.readings {
 		if len(deviceReadings) > 0 {
-			readingsData, err := json.MarshalIndent(deviceReadings, "", "  ")
+			err := s.storageManager.saveReadings(deviceAddr, deviceReadings)
 			if err != nil {
-				log.Printf("Failed to marshal readings for device %s: %v", deviceAddr, err)
-			} else {
-				deviceFile := fmt.Sprintf("%s/readings_%s.json", s.config.StorageDir, deviceAddr)
-				if err := os.WriteFile(deviceFile, readingsData, 0644); err != nil {
-					log.Printf("Failed to save readings for device %s: %v", deviceAddr, err)
-				}
+				log.Printf("Failed to save readings for device %s: %v", deviceAddr, err)
 			}
 		}
 	}
@@ -386,15 +764,20 @@ func (s *Server) getClients() []*ClientStatus {
 	return clients
 }
 
-// getDeviceReadings returns readings for a specific device
-func (s *Server) getDeviceReadings(deviceAddr string) []Reading {
+// getDeviceReadings returns readings for a specific device with optional time range
+func (s *Server) getDeviceReadings(deviceAddr string, fromTime, toTime time.Time) ([]Reading, error) {
+	// First try to get from in-memory store
 	s.mu.RLock()
-	defer s.mu.RUnlock()
+	inMemoryReadings, exists := s.readings[deviceAddr]
+	s.mu.RUnlock()
 
-	if readings, exists := s.readings[deviceAddr]; exists {
-		return readings
+	if exists && (fromTime.IsZero() && toTime.IsZero()) {
+		// If no time range is specified and readings exist in memory, return those
+		return inMemoryReadings, nil
 	}
-	return []Reading{}
+
+	// Otherwise, use the storage manager to get readings
+	return s.storageManager.loadReadings(deviceAddr, fromTime, toTime)
 }
 
 // getDeviceStats returns statistics for a specific device
@@ -496,7 +879,10 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Skip authentication for GET requests to public endpoints
-		if r.Method == "GET" && (strings.HasPrefix(r.URL.Path, "/") || r.URL.Path == "/health") {
+		if r.Method == "GET" && (r.URL.Path == "/" || strings.HasPrefix(r.URL.Path, "/js/") ||
+			strings.HasPrefix(r.URL.Path, "/css/") ||
+			strings.HasPrefix(r.URL.Path, "/img/") ||
+			r.URL.Path == "/health") {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -576,13 +962,42 @@ func (s *Server) handleReadings(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)
 
 	case "GET":
-		// Get readings for a specific device
+		// Get readings for a specific device with optional time range
 		deviceAddr := r.URL.Query().Get("device")
 		if deviceAddr == "" {
 			http.Error(w, "Missing device parameter", http.StatusBadRequest)
 			return
 		}
-		readings := s.getDeviceReadings(deviceAddr)
+
+		// Parse time range parameters
+		fromTimeStr := r.URL.Query().Get("from")
+		toTimeStr := r.URL.Query().Get("to")
+
+		var fromTime, toTime time.Time
+		var err error
+
+		if fromTimeStr != "" {
+			fromTime, err = time.Parse(time.RFC3339, fromTimeStr)
+			if err != nil {
+				http.Error(w, "Invalid 'from' time format. Use RFC3339 format (e.g., 2023-04-10T15:04:05Z)", http.StatusBadRequest)
+				return
+			}
+		}
+
+		if toTimeStr != "" {
+			toTime, err = time.Parse(time.RFC3339, toTimeStr)
+			if err != nil {
+				http.Error(w, "Invalid 'to' time format. Use RFC3339 format (e.g., 2023-04-10T15:04:05Z)", http.StatusBadRequest)
+				return
+			}
+		}
+
+		readings, err := s.getDeviceReadings(deviceAddr, fromTime, toTime)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Error loading readings: %v", err), http.StatusInternalServerError)
+			return
+		}
+
 		json.NewEncoder(w).Encode(readings)
 
 	default:
@@ -679,26 +1094,9 @@ func (s *Server) handleDashboardData(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(dashboardData)
 }
 
-// handleHealthCheck handles health check requests
-func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "GET" {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK"))
-}
-
-// API key management endpoints
+// handleAPIKeys handles API key management
 func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
-	// This endpoint requires admin API key
-	apiKey := r.Header.Get("X-API-Key")
-	if apiKey != s.auth.AdminKey {
-		http.Error(w, "Unauthorized: Admin API key required", http.StatusUnauthorized)
-		return
-	}
-
+	// This endpoint requires admin API key (checked in middleware)
 	switch r.Method {
 	case "GET":
 		// List all API keys (except admin key)
@@ -772,6 +1170,17 @@ func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleHealthCheck handles health check requests
+func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
+}
+
 // generateAPIKey creates a new random API key
 func generateAPIKey() string {
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -793,7 +1202,7 @@ func handleStaticFiles(dir string) http.Handler {
 func main() {
 	// Parse command-line flags
 	port := flag.Int("port", 8080, "server port")
-	logFile := flag.String("log", "govee-server.log", "log file path")
+	logFile := flag.String("log", "govee_server.log", "log file path")
 	staticDir := flag.String("static", "./static", "static files directory")
 	storageDir := flag.String("storage", "./data", "data storage directory")
 	clientTimeout := flag.Duration("timeout", 5*time.Minute, "client inactivity timeout")
@@ -806,6 +1215,19 @@ func main() {
 	adminKey := flag.String("admin-key", "", "admin API key (generated if empty)")
 	defaultKey := flag.String("default-key", "", "default API key for all clients (generated if empty)")
 	allowDefaultKey := flag.Bool("allow-default", false, "allow the default API key to be used")
+
+	// HTTPS flags
+	enableHTTPS := flag.Bool("https", false, "enable HTTPS")
+	certFile := flag.String("cert", "cert.pem", "path to TLS certificate file")
+	keyFile := flag.String("key", "key.pem", "path to TLS key file")
+
+	// Storage and retention flags
+	timePartitioning := flag.Bool("time-partition", true, "enable time-based partitioning of data")
+	partitionInterval := flag.Duration("partition-interval", 30*24*time.Hour, "interval for creating new partitions (e.g., 24h, 720h)")
+	retentionPeriod := flag.Duration("retention", 0, "data retention period, 0 for unlimited (e.g., 8760h for 1 year)")
+	maxReadingsPerFile := flag.Int("max-file-readings", 1000, "maximum readings per file")
+	compressOldData := flag.Bool("compress", true, "compress older partitions to save space")
+
 	flag.Parse()
 
 	// Create authentication configuration
@@ -844,15 +1266,41 @@ func main() {
 		StorageDir:         *storageDir,
 		PersistenceEnabled: *persistenceEnabled,
 		SaveInterval:       *saveInterval,
+		EnableHTTPS:        *enableHTTPS,
+		CertFile:           *certFile,
+		KeyFile:            *keyFile,
 	}
 
+	// Create storage configuration
+	storageConfig := &StorageConfig{
+		BaseDir:            *storageDir,
+		TimePartitioning:   *timePartitioning,
+		PartitionInterval:  *partitionInterval,
+		RetentionPeriod:    *retentionPeriod,
+		MaxReadingsPerFile: *maxReadingsPerFile,
+		CompressOldData:    *compressOldData,
+	}
+
+	// Create storage manager
+	storageManager := NewStorageManager(storageConfig)
+
 	// Create and initialize server
-	server := NewServer(config, auth)
+	server := NewServer(config, auth, storageManager)
 
 	// Load data from storage if enabled
 	if config.PersistenceEnabled {
 		server.loadData()
 	}
+
+	// Start a routine to periodically enforce retention
+	go func() {
+		retentionTicker := time.NewTicker(24 * time.Hour) // Check retention daily
+		for range retentionTicker.C {
+			if err := storageManager.enforceRetention(); err != nil {
+				log.Printf("Error enforcing retention: %v", err)
+			}
+		}
+	}()
 
 	// Create HTTP server
 	mux := http.NewServeMux()
@@ -872,30 +1320,59 @@ func main() {
 	// Serve static files for dashboard
 	mux.Handle("/", handleStaticFiles(*staticDir))
 
-	// Create HTTP server
-	httpServer := &http.Server{
-		Addr:         fmt.Sprintf(":%d", config.Port),
-		Handler:      mux,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-	}
+	var httpServer *http.Server
 
-	// Start server in a goroutine
-	go func() {
-		log.Printf("Starting Govee Server on port %d", config.Port)
-		if auth.EnableAuth {
-			log.Printf("Authentication is enabled. Admin key: %s", auth.AdminKey)
-			if auth.AllowDefaultKey {
-				log.Printf("Default API key: %s", auth.DefaultAPIKey)
+	if *enableHTTPS {
+		// Check if certificate files exist
+		certPath := *certFile
+		keyPath := *keyFile
+
+		if !filepath.IsAbs(certPath) {
+			certPath = filepath.Join(*storageDir, certPath)
+		}
+
+		if !filepath.IsAbs(keyPath) {
+			keyPath = filepath.Join(*storageDir, keyPath)
+		}
+
+		// Create HTTPS server
+		httpServer = &http.Server{
+			Addr:         fmt.Sprintf(":%d", config.Port),
+			Handler:      mux,
+			ReadTimeout:  10 * time.Second,
+			WriteTimeout: 10 * time.Second,
+			TLSConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+			},
+		}
+
+		log.Printf("Starting Govee Server with HTTPS on port %d", config.Port)
+		log.Printf("Using certificate: %s", certPath)
+		log.Printf("Using key: %s", keyPath)
+
+		// Start server in a goroutine
+		go func() {
+			if err := httpServer.ListenAndServeTLS(certPath, keyPath); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("HTTPS server error: %v", err)
 			}
-		} else {
-			log.Printf("Authentication is disabled")
+		}()
+	} else {
+		// Create HTTP server
+		httpServer = &http.Server{
+			Addr:         fmt.Sprintf(":%d", config.Port),
+			Handler:      mux,
+			ReadTimeout:  10 * time.Second,
+			WriteTimeout: 10 * time.Second,
 		}
 
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("HTTP server error: %v", err)
-		}
-	}()
+		// Start server in a goroutine
+		go func() {
+			log.Printf("Starting Govee Server on port %d", config.Port)
+			if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("HTTP server error: %v", err)
+			}
+		}()
+	}
 
 	// Handle graceful shutdown
 	stop := make(chan os.Signal, 1)

@@ -1,3 +1,5 @@
+# Update client/Dockerfile to include the new environment variables
+
 FROM golang:1.18-alpine
 
 WORKDIR /app
@@ -13,7 +15,7 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN go build -o govee-client ./govee-client.go
+RUN go build -o govee-client ./govee_5075_client.go
 
 # Use a minimal Alpine image for the final image
 FROM alpine:3.14
@@ -32,9 +34,12 @@ RUN chmod +x /app/govee-client
 # Set environment variables with defaults
 ENV SERVER_URL=http://govee-server:8080/readings
 ENV CLIENT_ID=""
+ENV APIKEY=""
 ENV SCAN_DURATION=30s
 ENV CONTINUOUS=true
 ENV LOG_FILE=""
+ENV TEMP_OFFSET=0.0
+ENV HUMIDITY_OFFSET=0.0
 
 # Run the application
-CMD ["/bin/sh", "-c", "/app/govee-client -server=${SERVER_URL} -id=${CLIENT_ID} -duration=${SCAN_DURATION} -continuous=${CONTINUOUS} -log=${LOG_FILE}"]
+CMD ["/bin/sh", "-c", "/app/govee-client -server=${SERVER_URL} -id=${CLIENT_ID} -apikey=${APIKEY} -duration=${SCAN_DURATION} -continuous=${CONTINUOUS} -log=${LOG_FILE} -temp-offset=${TEMP_OFFSET} -humidity-offset=${HUMIDITY_OFFSET}"]

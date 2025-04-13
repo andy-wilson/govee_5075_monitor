@@ -476,9 +476,11 @@ func sendToServer(serverURL string, reading Reading, apiKey string, insecureSkip
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	// Add API key for authentication
+	// Add API key for authentication - THIS MUST BE INCLUDED
 	if apiKey != "" {
 		req.Header.Set("X-API-Key", apiKey)
+	} else {
+		log.Printf("Warning: No API key provided for authentication")
 	}
 
 	// Send the request

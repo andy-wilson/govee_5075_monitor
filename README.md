@@ -1,6 +1,6 @@
 # Govee Monitoring System
 
-A client-server system for monitoring Govee H5075 temperature and humidity sensors via Bluetooth Low Energy (BLE). This project includes a Go-based client for collecting sensor data, a server for aggregating and storing measurements, and a React-based dashboard for visualization.
+A client-server system for monitoring Govee H5075 temperature and humidity sensors via Bluetooth Low Energy (BLE). This project includes a Go-based client for collecting sensor data, a server for aggregating and storing measurements, and a simplified React-based dashboard for basic visualization.
 
 ## System Architecture
 
@@ -30,7 +30,7 @@ The system consists of the following components:
 
 - Linux, macOS, or Windows with Bluetooth 4.0+ support
 - Go 1.18 or later
-- Govee H5075 Temperature & Humidity Sensor devices
+- Govee H5075 Temperature & Humidity Sensor devices (you can buy these cheaply on Amazon)
 
 ### Server Requirements
 
@@ -392,8 +392,5 @@ For more advanced data analysis and visualization, the system includes optional 
 
 ## License
 
-This project is open source and available under the MIT License.
+This project is open source and available under the GPL v3 License.
 
-## Acknowledgments
-
-Based on the implementation of the Govee H5075 BLE reader.

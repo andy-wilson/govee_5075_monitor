@@ -1,0 +1,662 @@
+openapi: 3.0.3
+info:
+  title: Govee Monitoring System API
+  description: |
+    API for Govee H5075 Temperature and Humidity Monitoring System.
+    This API allows clients to submit sensor readings and retrieve data from the monitoring system.
+  version: 1.0.0
+  contact:
+    name: System Administrator
+    
+servers:
+  - url: https://server:8080
+    description: Production server (HTTPS)
+  - url: http://server:8080
+    description: Development server (HTTP)
+
+security:
+  - ApiKeyAuth: []
+
+paths:
+  /readings:
+    post:
+      summary: Submit a new sensor reading
+      description: Clients use this endpoint to submit new temperature and humidity readings from Govee H5075 devices
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Reading'
+      responses:
+        '201':
+          description: Reading successfully created
+        '400':
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized - API key missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+                
+    get:
+      summary: Get readings for a specific device
+      description: Retrieve historical readings for a specific device with optional time range filtering
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: device
+          in: query
+          description: Device MAC address
+          required: true
+          schema:
+            type: string
+            example: "A4:C1:38:25:A1:E3"
+        - name: from
+          in: query
+          description: Start time in RFC3339 format
+          required: false
+          schema:
+            type: string
+            format: date-time
+            example: "2023-04-01T00:00:00Z"
+        - name: to
+          in: query
+          description: End time in RFC3339 format
+          required: false
+          schema:
+            type: string
+            format: date-time
+            example: "2023-04-30T23:59:59Z"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Reading'
+        '400':
+          description: Invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized - API key missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+                
+  /devices:
+    get:
+      summary: Get all devices
+      description: Retrieve a list of all devices and their latest status
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DeviceStatus'
+        '401':
+          description: Unauthorized - API key missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  
+  /clients:
+    get:
+      summary: Get all clients
+      description: Retrieve a list of all clients and their status
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ClientStatus'
+        '401':
+          description: Unauthorized - API key missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+                
+  /stats:
+    get:
+      summary: Get statistics for a specific device
+      description: Retrieve statistical data for a specific device (min, max, avg values)
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: device
+          in: query
+          description: Device MAC address
+          required: true
+          schema:
+            type: string
+            example: "A4:C1:38:25:A1:E3"
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceStats'
+        '400':
+          description: Missing device parameter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized - API key missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+                
+  /dashboard/data:
+    get:
+      summary: Get all data needed for the dashboard
+      description: Retrieves a combined dataset for the dashboard UI, including devices, clients, and recent readings
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DashboardData'
+        '401':
+          description: Unauthorized - API key missing or invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+                
+  /api/keys:
+    get:
+      summary: List all API keys
+      description: Get a list of all API keys (except the admin key)
+      security:
+        - ApiKeyAuth: []
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  type: string
+                example:
+                  "xyz123abc": "client-bedroom"
+                  "def456ghi": "client-livingroom"
+        '401':
+          description: Unauthorized - Admin API key required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+                
+    post:
+      summary: Create a new API key
+      description: Create a new API key for a client
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - client_id
+              properties:
+                client_id:
+                  type: string
+                  description: Client ID to associate with the new API key
+                  example: "client-kitchen"
+      responses:
+        '201':
+          description: API key created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  api_key:
+                    type: string
+                    description: The newly generated API key
+                    example: "abc123def456ghi789jkl0"
+                  client_id:
+                    type: string
+                    description: The client ID associated with the API key
+                    example: "client-kitchen"
+        '400':
+          description: Invalid request - Missing client ID
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized - Admin API key required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+                
+    delete:
+      summary: Delete an API key
+      description: Delete an existing API key
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: key
+          in: query
+          description: API key to delete
+          required: true
+          schema:
+            type: string
+            example: "abc123def456ghi789jkl0"
+      responses:
+        '200':
+          description: API key deleted successfully
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "API key deleted"
+        '400':
+          description: Missing key parameter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized - Admin API key required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: API key not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+                
+  /health:
+    get:
+      summary: Health check endpoint
+      description: Check if the server is running
+      security: []  # No authentication required
+      responses:
+        '200':
+          description: Server is healthy
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "OK"
+        
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API key authentication
+      
+  schemas:
+    Reading:
+      type: object
+      required:
+        - device_name
+        - device_addr
+        - temp_c
+        - temp_f
+        - humidity
+        - client_id
+        - timestamp
+      properties:
+        device_name:
+          type: string
+          description: Name of the Govee device
+          example: "GVH5075_1234"
+        device_addr:
+          type: string
+          description: MAC address of the device
+          example: "A4:C1:38:25:A1:E3"
+        temp_c:
+          type: number
+          format: float
+          description: Temperature in Celsius
+          example: 22.5
+        temp_f:
+          type: number
+          format: float
+          description: Temperature in Fahrenheit
+          example: 72.5
+        temp_offset:
+          type: number
+          format: float
+          description: Temperature offset calibration
+          example: -0.5
+        humidity:
+          type: number
+          format: float
+          description: Relative humidity in percentage
+          example: 45.5
+        humidity_offset:
+          type: number
+          format: float
+          description: Humidity offset calibration
+          example: 2.0
+        abs_humidity:
+          type: number
+          format: float
+          description: Absolute humidity in g/m³
+          example: 9.3
+        dew_point_c:
+          type: number
+          format: float
+          description: Dew point in Celsius
+          example: 10.2
+        dew_point_f:
+          type: number
+          format: float
+          description: Dew point in Fahrenheit
+          example: 50.4
+        steam_pressure:
+          type: number
+          format: float
+          description: Steam pressure in hPa
+          example: 12.3
+        battery:
+          type: integer
+          description: Battery level in percentage
+          example: 87
+        rssi:
+          type: integer
+          description: Signal strength in dBm
+          example: -67
+        timestamp:
+          type: string
+          format: date-time
+          description: Time when the reading was taken
+          example: "2023-04-13T15:30:45Z"
+        client_id:
+          type: string
+          description: ID of the client that sent the reading
+          example: "client-livingroom"
+          
+    DeviceStatus:
+      type: object
+      properties:
+        device_name:
+          type: string
+          description: Name of the Govee device
+          example: "GVH5075_1234"
+        device_addr:
+          type: string
+          description: MAC address of the device
+          example: "A4:C1:38:25:A1:E3"
+        temp_c:
+          type: number
+          format: float
+          description: Temperature in Celsius
+          example: 22.5
+        temp_f:
+          type: number
+          format: float
+          description: Temperature in Fahrenheit
+          example: 72.5
+        temp_offset:
+          type: number
+          format: float
+          description: Temperature offset calibration
+          example: -0.5
+        humidity:
+          type: number
+          format: float
+          description: Relative humidity in percentage
+          example: 45.5
+        humidity_offset:
+          type: number
+          format: float
+          description: Humidity offset calibration
+          example: 2.0
+        abs_humidity:
+          type: number
+          format: float
+          description: Absolute humidity in g/m³
+          example: 9.3
+        dew_point_c:
+          type: number
+          format: float
+          description: Dew point in Celsius
+          example: 10.2
+        dew_point_f:
+          type: number
+          format: float
+          description: Dew point in Fahrenheit
+          example: 50.4
+        steam_pressure:
+          type: number
+          format: float
+          description: Steam pressure in hPa
+          example: 12.3
+        battery:
+          type: integer
+          description: Battery level in percentage
+          example: 87
+        rssi:
+          type: integer
+          description: Signal strength in dBm
+          example: -67
+        last_update:
+          type: string
+          format: date-time
+          description: Time of the last update
+          example: "2023-04-13T15:30:45Z"
+        client_id:
+          type: string
+          description: ID of the client that sent the reading
+          example: "client-livingroom"
+        last_seen:
+          type: string
+          format: date-time
+          description: Time when the device was last seen
+          example: "2023-04-13T15:30:45Z"
+        reading_count:
+          type: integer
+          description: Number of readings received from this device
+          example: 287
+          
+    ClientStatus:
+      type: object
+      properties:
+        client_id:
+          type: string
+          description: ID of the client
+          example: "client-livingroom"
+        last_seen:
+          type: string
+          format: date-time
+          description: Time when the client was last seen
+          example: "2023-04-13T15:30:45Z"
+        device_count:
+          type: integer
+          description: Number of devices reporting through this client
+          example: 2
+        reading_count:
+          type: integer
+          description: Number of readings sent by this client
+          example: 450
+        connected_since:
+          type: string
+          format: date-time
+          description: Time when the client first connected
+          example: "2023-04-10T12:00:00Z"
+        is_active:
+          type: boolean
+          description: Whether the client is currently active
+          example: true
+          
+    DeviceStats:
+      type: object
+      properties:
+        count:
+          type: integer
+          description: Number of readings used for statistics
+          example: 287
+        temp_c_min:
+          type: number
+          format: float
+          description: Minimum temperature in Celsius
+          example: 19.5
+        temp_c_max:
+          type: number
+          format: float
+          description: Maximum temperature in Celsius
+          example: 25.3
+        temp_c_avg:
+          type: number
+          format: float
+          description: Average temperature in Celsius
+          example: 22.1
+        humidity_min:
+          type: number
+          format: float
+          description: Minimum humidity in percentage
+          example: 38.5
+        humidity_max:
+          type: number
+          format: float
+          description: Maximum humidity in percentage
+          example: 52.3
+        humidity_avg:
+          type: number
+          format: float
+          description: Average humidity in percentage
+          example: 45.7
+        dew_point_c_min:
+          type: number
+          format: float
+          description: Minimum dew point in Celsius
+          example: 8.2
+        dew_point_c_max:
+          type: number
+          format: float
+          description: Maximum dew point in Celsius
+          example: 12.1
+        dew_point_c_avg:
+          type: number
+          format: float
+          description: Average dew point in Celsius
+          example: 10.3
+        abs_humidity_min:
+          type: number
+          format: float
+          description: Minimum absolute humidity in g/m³
+          example: 7.8
+        abs_humidity_max:
+          type: number
+          format: float
+          description: Maximum absolute humidity in g/m³
+          example: 10.5
+        abs_humidity_avg:
+          type: number
+          format: float
+          description: Average absolute humidity in g/m³
+          example: 9.1
+        steam_pressure_min:
+          type: number
+          format: float
+          description: Minimum steam pressure in hPa
+          example: 9.8
+        steam_pressure_max:
+          type: number
+          format: float
+          description: Maximum steam pressure in hPa
+          example: 13.5
+        steam_pressure_avg:
+          type: number
+          format: float
+          description: Average steam pressure in hPa
+          example: 11.7
+        first_reading:
+          type: string
+          format: date-time
+          description: Time of the first reading in the dataset
+          example: "2023-04-10T00:00:00Z"
+        last_reading:
+          type: string
+          format: date-time
+          description: Time of the last reading in the dataset
+          example: "2023-04-13T23:59:59Z"
+          
+    DashboardData:
+      type: object
+      properties:
+        devices:
+          type: array
+          description: List of all devices
+          items:
+            $ref: '#/components/schemas/DeviceStatus'
+        clients:
+          type: array
+          description: List of all clients
+          items:
+            $ref: '#/components/schemas/ClientStatus'
+        active_clients:
+          type: integer
+          description: Number of active clients
+          example: 3
+        total_readings:
+          type: integer
+          description: Total number of readings in the system
+          example: 1250
+        recent_readings:
+          type: object
+          description: Recent readings for each device (last 10)
+          additionalProperties:
+            type: array
+            items:
+              $ref: '#/components/schemas/Reading'
+        server_start_time:
+          type: string
+          format: date-time
+          description: Time when the server was started
+          example: "2023-04-10T00:00:00Z"
+    
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Error message
+          example: "Unauthorized: API key required"

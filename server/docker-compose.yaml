@@ -1,0 +1,72 @@
+version: '3'
+
+services:
+  govee-server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./static:/app/static
+      - ./certs:/app/certs
+    environment:
+      - PORT=8080
+      - LOG_FILE=/app/logs/govee_server.log
+      - STORAGE_DIR=/app/data
+      - CLIENT_TIMEOUT=5m
+      - HTTPS=true
+      - CERT=/app/certs/cert.pem
+      - KEY=/app/certs/key.pem
+      - AUTH=true
+      - ADMIN_KEY=${ADMIN_KEY:-admin-key-here}
+      - ALLOW_DEFAULT=false
+    restart: unless-stopped
+    command: >
+      /app/govee-server 
+      -port=${PORT} 
+      -log=${LOG_FILE} 
+      -storage=${STORAGE_DIR} 
+      -timeout=${CLIENT_TIMEOUT}
+      -https=${HTTPS}
+      -cert=${CERT}
+      -key=${KEY}
+      -auth=${AUTH}
+      -admin-key=${ADMIN_KEY}
+      -allow-default=${ALLOW_DEFAULT}
+
+  # Optional InfluxDB service for additional data storage
+  influxdb:
+    image: influxdb:2.0
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=goveepassword
+      - DOCKER_INFLUXDB_INIT_ORG=govee
+      - DOCKER_INFLUXDB_INIT_BUCKET=govee_metrics
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=myauthtoken
+    restart: unless-stopped
+
+  # Optional Grafana service for additional visualization
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=goveepassword
+    depends_on:
+      - influxdb
+    restart: unless-stopped
+
+volumes:
+  influxdb-data:
+  grafana-data:

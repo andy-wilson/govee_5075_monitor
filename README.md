@@ -3,7 +3,7 @@
 A client-server system for monitoring Govee H5075 temperature and humidity sensors via Bluetooth Low Energy (BLE). This project includes a client for collecting sensor data, a server for aggregating and storing measurements, and a simplified React-based dashboard for basic visualization.
 
 The feature set may seem a little random, and a bit extensive/specific in some specific areas, but I've been developing this while trying to solve some specific problems with sensors at home, and well.. things got a bit out of hand.
-Needless to say, this might be utterly broken for you, that old addage "works on my machine" seems appropriate. This comes with absolutely no warranty whatsover (as per the [license](LICENSE.md)license).
+Needless to say, this might be utterly broken for you, that old addage "works on my machine" seems appropriate. This comes with absolutely no warranty whatsover (as per the [license](LICENSE.md)).
 
 I'm not intending to do much with this other than nerd out and use it at home, but if someone finds any of this useful for home use then great. I have a few [TODOs](TODO.md) still, but if anyone finds this and wants/needs a feature, feel free to be harsh with the code critique, and also to submit PRs. 
 

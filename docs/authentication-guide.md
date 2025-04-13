@@ -1,175 +1,269 @@
-# Authentication System for Govee Monitoring System
+# Authentication guide for Govee 5075 Monitor
 
-This guide explains the authentication system implemented in the Govee Monitoring System to ensure that only authorized clients can send data to the server.
+This guide explains the security features of the Govee 5075 Monitoring System, covering both API key authentication and HTTPS encryption.
 
-## Overview
+## Security Overview
 
-The authentication system uses API keys to authenticate clients. Each client needs a valid API key to send data to the server.
+The system implements two complementary layers of security:
 
-## Authentication Types
+1. **API Key Authentication** - Verifies that clients are authorized to communicate with the server
+2. **HTTPS/TLS Encryption** - Encrypts all data in transit between clients and the server
+
+For maximum security, both features should be enabled and properly configured.
+
+## API Key Authentication
+
+### How Authentication Works
+
+The Govee Monitoring System uses API keys to control access to server resources:
+
+- Each client must provide a valid API key with every request
+- API keys are associated with specific client IDs
+- The server validates both the API key and the client ID
+
+### Authentication Types
+
+The system supports three categories of API keys:
 
 1. **Admin API Key**: Has full access to all server functions including API key management
-2. **Client-Specific API Keys**: Tied to specific client IDs
-3. **Default API Key**: Optional shared key that can be used by all clients
+2. **Client-Specific API Keys**: Tied to specific client IDs, allows clients to send data
+3. **Default API Key**: Optional shared key that can be used by all clients (less secure)
 
-## Server Configuration
+### Setting Up Authentication
 
-When starting the server, you can configure authentication with these flags:
+#### Server Configuration
+
+When starting the server, enable authentication with these flags:
+
+```bash
+./govee-server -auth=true -admin-key=YOUR_ADMIN_KEY
+```
+
+Available authentication flags:
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-auth` | true | Enable API key authentication |
 | `-admin-key` | auto-generated | Admin API key (generated if empty) |
-| `-default-key` | auto-generated | Default API key for all clients (generated if empty) |
+| `-default-key` | auto-generated | Default API key for all clients |
 | `-allow-default` | false | Allow the default API key to be used |
 
-### Examples
+#### Managing API Keys
 
-**Starting the server with authentication enabled:**
+You can manage client API keys using the API (requires admin key):
+
+**List all API keys:**
 ```bash
-./govee-server -auth=true
+curl -H "X-API-Key: <admin_key>" http://server:8080/api/keys
 ```
-The server will automatically generate and display the admin API key.
 
-**Starting the server with pre-defined keys:**
+**Create a new API key:**
 ```bash
-./govee-server -admin-key=admin123 -default-key=default123 -allow-default=true
-```
-
-**Disabling authentication (not recommended for production):**
-```bash
-./govee-server -auth=false
-```
-
-## Client Configuration
-
-Clients must provide their API key when sending data to the server:
-
-```bash
-./govee-client -server=http://server:8080/readings -apikey=YOUR_API_KEY -id=client-name
-```
-
-If no API key is provided, the client will warn you that server communications may fail.
-
-**Note**: Authentication is not required when running the client in local or discovery mode:
-```bash
-./govee-client -local=true
-# OR
-./govee-client -discover
-```
-
-## API Key Management
-
-API keys can be managed through the server's API (requires admin API key):
-
-### List all API keys
-
-```
-GET /api/keys
-Header: X-API-Key: <admin_key>
-```
-
-Example using curl:
-```bash
-curl -H "X-API-Key: your_admin_key" http://server:8080/api/keys
-```
-
-### Create a new API key
-
-```
-POST /api/keys
-Header: X-API-Key: <admin_key>
-Body: {"client_id": "client-name"}
-```
-
-Example using curl:
-```bash
-curl -X POST -H "X-API-Key: your_admin_key" -H "Content-Type: application/json" \
-  -d '{"client_id": "client-bedroom"}' \
+curl -X POST -H "X-API-Key: <admin_key>" -H "Content-Type: application/json" \
+  -d '{"client_id": "client-kitchen"}' \
   http://server:8080/api/keys
 ```
 
-The server will respond with the newly created API key:
-```json
-{
-  "api_key": "abc123def456ghi789jkl0",
-  "client_id": "client-bedroom"
-}
-```
-
-### Delete an API key
-
-```
-DELETE /api/keys?key=<api_key_to_delete>
-Header: X-API-Key: <admin_key>
-```
-
-Example using curl:
+**Delete an API key:**
 ```bash
-curl -X DELETE -H "X-API-Key: your_admin_key" \
-  http://server:8080/api/keys?key=abc123def456ghi789jkl0
+curl -X DELETE -H "X-API-Key: <admin_key>" \
+  http://server:8080/api/keys?key=<api_key_to_delete>
 ```
 
-## Authentication Flow
+#### Client Configuration
 
-1. Client obtains an API key (either from admin or using default key)
-2. Client sends data to server with API key in `X-API-Key` header
-3. Server validates the API key:
-   - If admin key: full access granted
-   - If client-specific key: validates that client ID matches
-   - If default key (and allowed): access granted
-4. If authentication fails, server returns 401 Unauthorized
+Clients must provide their API key when sending data:
 
-## Client ID Validation
+```bash
+./govee-client -server=http://server:8080/readings -apikey=YOUR_API_KEY -id=client-kitchen
+```
 
-For client-specific API keys, the server validates that the client ID in the request matches the one associated with the API key. This prevents clients from impersonating each other.
+## HTTPS Encryption
 
-For example, if an API key is created for "client-bedroom", it can only be used to send data with that client ID. If a different client ID is used with this API key, the server will reject the request.
+HTTPS (HTTP Secure) uses Transport Layer Security (TLS) to encrypt all communications:
 
-## Security Considerations
+- Prevents eavesdropping on sensitive data (API keys, readings)
+- Verifies the identity of the server to prevent man-in-the-middle attacks
+- Works alongside API key authentication for a layered security approach
 
-- API keys are stored in the server's data directory if persistence is enabled
-- Admin API key grants full access, so keep it secure
-- Client-specific keys can only be used with their associated client ID
-- The default API key (if enabled) is less secure as it can be used by any client
-- In production environments:
-  - Use HTTPS to encrypt API key transmission
-  - Generate strong API keys (the server does this by default)
-  - Disable the default API key option if possible
-  - Regularly rotate API keys for better security
+### Setting Up HTTPS
 
-## Troubleshooting Authentication Issues
+#### 1. Generate Certificates
 
-### Server-side issues:
+You can use the provided script to generate self-signed certificates:
 
-1. **Check if authentication is enabled:**
-   - Verify the `-auth` flag is set to `true`
-   - Check server logs for authentication status
+```bash
+./generate_cert.sh --name your-server-hostname --ip your-server-ip
+```
 
-2. **Verify API keys are loaded:**
-   - Check server logs for "Loaded X API keys from storage"
-   - Restart server if keys are not loading
+This creates:
+- A Certificate Authority (CA) certificate (`ca.crt`)
+- A server certificate (`cert.pem`)
+- A private key (`key.pem`)
 
-3. **Inspect authentication failures in logs:**
-   - Look for "Authentication failed" messages
-   - Check for client ID mismatches
+For production, consider obtaining certificates from a trusted certificate authority.
 
-### Client-side issues:
+#### 2. Configure the Server for HTTPS
 
-1. **Verify API key is being sent:**
-   - Check client logs for authentication failures
-   - Ensure `-apikey` flag is set correctly
+Enable HTTPS on the server:
 
-2. **Check client ID:**
-   - Make sure client ID matches the one associated with the API key
-   - If using custom client ID, ensure it's the same one registered with the API key
+```bash
+./govee-server -https=true -cert=./certs/cert.pem -key=./certs/key.pem
+```
 
-3. **Test with default key if allowed:**
-   - If server allows default key, try using it for testing
+HTTPS flags:
 
-## Best Practices
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-https` | false | Enable HTTPS |
+| `-cert` | cert.pem | Path to TLS certificate file |
+| `-key` | key.pem | Path to TLS key file |
 
-1. **Create specific keys for each client:** Avoid sharing API keys between clients
-2. **Use meaningful client IDs:** Name clients based on location or purpose for easier management
-3. **Secure admin key:** Store the admin key securely and limit its use to administrative tasks
-4. **Monitor authentication failures:** Regularly check server logs for unusual authentication patterns
+#### 3. Configure Clients for HTTPS
+
+Clients must be configured to use HTTPS and verify the server's certificate:
+
+```bash
+./govee-client -server=https://server:8080/readings -ca-cert=./certs/ca.crt -apikey=YOUR_API_KEY
+```
+
+HTTPS client flags:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-ca-cert` | "" | Path to CA certificate file |
+| `-insecure` | false | Skip certificate verification (NOT recommended for production) |
+
+## Using Both Security Layers Together
+
+For maximum security, enable both authentication and HTTPS:
+
+### Server Configuration
+
+```bash
+./govee-server -https=true -cert=./certs/cert.pem -key=./certs/key.pem -auth=true
+```
+
+### Client Configuration
+
+```bash
+./govee-client -server=https://server:8080/readings \
+  -ca-cert=./certs/ca.crt \
+  -apikey=YOUR_API_KEY \
+  -id=client-kitchen
+```
+
+### Docker Configuration
+
+For Docker deployments:
+
+```yaml
+services:
+  govee-server:
+    # ...other settings...
+    volumes:
+      - ./certs:/app/certs
+    environment:
+      - HTTPS=true
+      - CERT=/app/certs/cert.pem
+      - KEY=/app/certs/key.pem
+      - AUTH=true
+      - ADMIN_KEY=${ADMIN_KEY:-admin-key-here}
+
+  govee-client:
+    # ...other settings...
+    environment:
+      - SERVER_URL=https://server:8080/readings
+      - APIKEY=${CLIENT_APIKEY:-your_api_key_here}
+      - CA_CERT=/app/certs/ca.crt
+    volumes:
+      - ./certs:/app/certs
+```
+
+## Testing Security Configuration
+
+### Testing Authentication
+
+1. **Try with invalid API key:**
+   ```bash
+   ./govee-client -server=http://server:8080/readings -apikey=INVALID_KEY
+   ```
+   
+   You should see an "Authentication failed" error.
+
+2. **Try with wrong client ID:**
+   ```bash
+   ./govee-client -server=http://server:8080/readings -apikey=VALID_KEY -id=wrong-client-id
+   ```
+   
+   You should see a "Client ID mismatch" error.
+
+### Testing HTTPS
+
+1. **Verify certificate details:**
+   ```bash
+   openssl x509 -in certs/cert.pem -text -noout
+   ```
+   
+   Check that the hostname matches your server.
+
+2. **Test HTTPS connection:**
+   ```bash
+   curl -v --cacert certs/ca.crt https://server:8080/health
+   ```
+   
+   You should see "OK" with TLS handshake details.
+
+## Troubleshooting
+
+### Authentication Issues
+
+1. **"Unauthorized: API key required"**
+   - Verify API key is being included in the request header
+   - Check that the `-apikey` flag is set correctly
+
+2. **"Unauthorized: Invalid API key"**
+   - Verify the API key exists on the server
+   - Try regenerating the API key
+
+3. **"Unauthorized: Client ID mismatch"**
+   - Ensure client ID matches the one registered with the API key
+   - Check for typos or case sensitivity issues
+
+### HTTPS/TLS Issues
+
+1. **Certificate verification failure**
+   - Verify server hostname matches the certificate's Common Name or SAN
+   - Ensure CA certificate is correctly provided to the client
+   - Check certificate expiration dates
+
+2. **"Connection refused" or timeouts**
+   - Verify the server is listening on the correct port
+   - Check firewall rules for HTTPS port
+   - Try using curl with `-k` to bypass verification for testing
+
+## Security Best Practices
+
+1. **Use both authentication and HTTPS** for defense in depth
+2. **Generate unique API keys** for each client
+3. **Rotate API keys periodically** for better security
+4. **Use trusted certificates** in production environments
+5. **Keep private keys secure** with appropriate permissions
+6. **Monitor authentication logs** for unusual activity
+7. **Disable the default API key** in production
+8. **Use environment variables** for API keys in Docker deployments
+9. **Back up certificates and keys** securely
+10. **Implement rate limiting** to prevent brute force attacks
+
+## Appendix: Endpoint Security
+
+| Endpoint | Auth Required | Description |
+|----------|---------------|-------------|
+| `/readings` | Yes | Add/get sensor readings |
+| `/devices` | Yes | Get device information |
+| `/clients` | Yes | Get client information |
+| `/stats` | Yes | Get statistics |
+| `/dashboard/data` | Yes | Dashboard data |
+| `/api/keys` | Admin only | Manage API keys |
+| `/health` | No | Health check endpoint |
+| `/` | No | Static dashboard files |

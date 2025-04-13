@@ -11,12 +11,31 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./static:/app/static
+      - ./certs:/app/certs
     environment:
       - PORT=8080
-      - LOG_FILE=/app/logs/govee-server.log
+      - LOG_FILE=/app/logs/govee_server.log
       - STORAGE_DIR=/app/data
       - CLIENT_TIMEOUT=5m
+      - HTTPS=true
+      - CERT=/app/certs/cert.pem
+      - KEY=/app/certs/key.pem
+      - AUTH=true
+      - ADMIN_KEY=${ADMIN_KEY:-admin-key-here}
+      - ALLOW_DEFAULT=false
     restart: unless-stopped
+    command: >
+      /app/govee-server 
+      -port=${PORT} 
+      -log=${LOG_FILE} 
+      -storage=${STORAGE_DIR} 
+      -timeout=${CLIENT_TIMEOUT}
+      -https=${HTTPS}
+      -cert=${CERT}
+      -key=${KEY}
+      -auth=${AUTH}
+      -admin-key=${ADMIN_KEY}
+      -allow-default=${ALLOW_DEFAULT}
 
   # Optional InfluxDB service for additional data storage
   influxdb:

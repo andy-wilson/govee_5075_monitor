@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -76,6 +78,9 @@ func main() {
 	discoveryMode := flag.Bool("discover", false, "discovery mode - only scan for devices and print a list")
 	tempOffset := flag.Float64("temp-offset", 0.0, "temperature offset calibration (°C)")
 	humidityOffset := flag.Float64("humidity-offset", 0.0, "humidity offset calibration (%)")
+	// HTTPS flags
+	insecureSkipVerify := flag.Bool("insecure", false, "skip TLS certificate verification")
+	caCertFile := flag.String("ca-cert", "", "path to CA certificate file for TLS verification")
 	flag.Parse()
 
 	// Check if API key is provided when not in local mode
@@ -289,7 +294,7 @@ func main() {
 
 							// Send to server if not in local mode
 							if !*localOnly {
-								go sendToServer(*serverURL, reading, *apiKey)
+								go sendToServer(*serverURL, reading, *apiKey, *insecureSkipVerify, *caCertFile)
 							}
 
 							// Print device information
@@ -420,12 +425,47 @@ func printDeviceText(device *GoveeDevice) {
 	)
 }
 
-func sendToServer(serverURL string, reading Reading, apiKey string) {
+func sendToServer(serverURL string, reading Reading, apiKey string, insecureSkipVerify bool, caCertFile string) {
 	// Convert reading to JSON
 	jsonData, err := json.Marshal(reading)
 	if err != nil {
 		log.Printf("Error marshaling JSON: %v", err)
 		return
+	}
+
+	// Create HTTP client with TLS configuration
+	tlsConfig := &tls.Config{}
+
+	// Handle certificate verification options
+	if insecureSkipVerify {
+		tlsConfig.InsecureSkipVerify = true
+		log.Printf("Warning: TLS certificate verification disabled")
+	} else if caCertFile != "" {
+		// Load CA cert if specified
+		caCert, err := os.ReadFile(caCertFile)
+		if err != nil {
+			log.Printf("Error loading CA certificate: %v", err)
+			return
+		}
+
+		caCertPool := x509.NewCertPool()
+		if ok := caCertPool.AppendCertsFromPEM(caCert); !ok {
+			log.Printf("Failed to append CA certificate")
+			return
+		}
+
+		tlsConfig.RootCAs = caCertPool
+		log.Printf("Using custom CA certificate for TLS verification")
+	}
+
+	// Create transport and client
+	transport := &http.Transport{
+		TLSClientConfig: tlsConfig,
+	}
+
+	client := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: transport,
 	}
 
 	// Create HTTP request
@@ -436,13 +476,14 @@ func sendToServer(serverURL string, reading Reading, apiKey string) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	// Add API key for authentication
+	// Add API key for authentication - THIS MUST BE INCLUDED
 	if apiKey != "" {
 		req.Header.Set("X-API-Key", apiKey)
+	} else {
+		log.Printf("Warning: No API key provided for authentication")
 	}
 
 	// Send the request
-	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("Error sending data to server: %v", err)

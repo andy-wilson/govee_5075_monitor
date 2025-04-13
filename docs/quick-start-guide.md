@@ -1,6 +1,6 @@
 # Govee Monitoring System - Quick Start Guide
 
-This guide will help you get the Govee Monitoring System up and running quickly.
+This guide will help you get the Govee 5075 Monitoring System up and running. It is likely full of bugs, but appears to work for me :)
 
 ## Prerequisites
 
@@ -13,7 +13,7 @@ This guide will help you get the Govee Monitoring System up and running quickly.
 
 1. Build the client:
    ```bash
-   go build -o govee-client govee_5075_client.go
+   go build -o govee-client govee-client.go
    ```
 
 2. Run the client in discovery mode:
@@ -35,7 +35,7 @@ This guide will help you get the Govee Monitoring System up and running quickly.
 
 1. Build the server:
    ```bash
-   go build -o govee-server govee_5075_server.go
+   go build -o govee-server govee-server.go
    ```
 
 2. Create required directories:

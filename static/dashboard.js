@@ -8,6 +8,7 @@ const Dashboard = () => {
   const [selectedDevice, setSelectedDevice] = useState(null);
   const [refreshInterval, setRefreshInterval] = useState(30);
   const [lastUpdated, setLastUpdated] = useState(null);
+  const [activeTab, setActiveTab] = useState("main"); // For switching between chart types
 
   // Fetch dashboard data
   const fetchDashboardData = async () => {
@@ -69,7 +70,13 @@ const Dashboard = () => {
     return dashboardData.recent_readings[selectedDevice].map(reading => ({
       time: formatTime(reading.timestamp),
       temperature: reading.temp_c,
+      tempF: reading.temp_f,
       humidity: reading.humidity,
+      dewPoint: reading.dew_point_c,
+      dewPointF: reading.dew_point_f,
+      absHumidity: reading.abs_humidity,
+      steamPressure: reading.steam_pressure,
+      battery: reading.battery,
       timestamp: reading.timestamp
     }));
   };
@@ -136,40 +143,103 @@ const Dashboard = () => {
         </div>
         
         {selectedDeviceObj && (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-            <div className="bg-gray-50 p-4 rounded">
-              <div className="text-sm text-gray-500">Temperature</div>
-              <div className="text-2xl font-bold">{selectedDeviceObj.TempC.toFixed(1)}°C / {selectedDeviceObj.TempF.toFixed(1)}°F</div>
-            </div>
-            
-            <div className="bg-gray-50 p-4 rounded">
-              <div className="text-sm text-gray-500">Humidity</div>
-              <div className="text-2xl font-bold">{selectedDeviceObj.Humidity.toFixed(1)}%</div>
-            </div>
-            
-            <div className="bg-gray-50 p-4 rounded">
-              <div className="text-sm text-gray-500">Battery</div>
-              <div className="text-2xl font-bold">{selectedDeviceObj.Battery}%</div>
-            </div>
-            
-            <div className="bg-gray-50 p-4 rounded">
-              <div className="text-sm text-gray-500">Signal Strength</div>
-              <div className="text-2xl font-bold">{selectedDeviceObj.RSSI} dBm</div>
-            </div>
-            
-            <div className="bg-gray-50 p-4 rounded col-span-2">
-              <div className="text-sm text-gray-500">Last Update</div>
-              <div className="text-xl font-bold">
-                {formatDate(selectedDeviceObj.LastUpdate)} {formatTime(selectedDeviceObj.LastUpdate)}
+          <div>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-4">
+              {/* Temperature */}
+              <div className="bg-gray-50 p-4 rounded">
+                <div className="text-sm text-gray-500">Temperature</div>
+                <div className="text-2xl font-bold">{selectedDeviceObj.TempC.toFixed(1)}°C / {selectedDeviceObj.TempF.toFixed(1)}°F</div>
+                {selectedDeviceObj.TempOffset !== 0 && (
+                  <div className="text-xs text-gray-500">Offset: {selectedDeviceObj.TempOffset > 0 ? '+' : ''}{selectedDeviceObj.TempOffset.toFixed(1)}°C</div>
+                )}
+              </div>
+              
+              {/* Humidity */}
+              <div className="bg-gray-50 p-4 rounded">
+                <div className="text-sm text-gray-500">Humidity</div>
+                <div className="text-2xl font-bold">{selectedDeviceObj.Humidity.toFixed(1)}%</div>
+                {selectedDeviceObj.HumidityOffset !== 0 && (
+                  <div className="text-xs text-gray-500">Offset: {selectedDeviceObj.HumidityOffset > 0 ? '+' : ''}{selectedDeviceObj.HumidityOffset.toFixed(1)}%</div>
+                )}
+              </div>
+              
+              {/* Dew Point */}
+              <div className="bg-gray-50 p-4 rounded">
+                <div className="text-sm text-gray-500">Dew Point</div>
+                <div className="text-2xl font-bold">{selectedDeviceObj.DewPointC.toFixed(1)}°C / {selectedDeviceObj.DewPointF.toFixed(1)}°F</div>
+              </div>
+              
+              {/* Absolute Humidity */}
+              <div className="bg-gray-50 p-4 rounded">
+                <div className="text-sm text-gray-500">Absolute Humidity</div>
+                <div className="text-2xl font-bold">{selectedDeviceObj.AbsHumidity.toFixed(1)} g/m³</div>
+              </div>
+              
+              {/* Steam Pressure */}
+              <div className="bg-gray-50 p-4 rounded">
+                <div className="text-sm text-gray-500">Steam Pressure</div>
+                <div className="text-2xl font-bold">{selectedDeviceObj.SteamPressure.toFixed(1)} hPa</div>
+              </div>
+              
+              {/* Battery */}
+              <div className="bg-gray-50 p-4 rounded">
+                <div className="text-sm text-gray-500">Battery</div>
+                <div className="text-2xl font-bold">{selectedDeviceObj.Battery}%</div>
               </div>
             </div>
             
-            <div className="bg-gray-50 p-4 rounded col-span-2">
-              <div className="text-sm text-gray-500">Client</div>
-              <div className="text-xl font-bold">{selectedDeviceObj.ClientID}</div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Signal Strength */}
+              <div className="bg-gray-50 p-4 rounded">
+                <div className="text-sm text-gray-500">Signal Strength</div>
+                <div className="text-2xl font-bold">{selectedDeviceObj.RSSI} dBm</div>
+              </div>
+              
+              {/* Last Update */}
+              <div className="bg-gray-50 p-4 rounded">
+                <div className="text-sm text-gray-500">Last Update</div>
+                <div className="text-xl font-bold">
+                  {formatDate(selectedDeviceObj.LastUpdate)} {formatTime(selectedDeviceObj.LastUpdate)}
+                </div>
+              </div>
+              
+              {/* Client ID */}
+              <div className="bg-gray-50 p-4 rounded col-span-1 md:col-span-2">
+                <div className="text-sm text-gray-500">Client</div>
+                <div className="text-xl font-bold">{selectedDeviceObj.ClientID}</div>
+              </div>
             </div>
           </div>
         )}
+      </div>
+    );
+  };
+
+  // Chart tabs
+  const ChartTabs = () => {
+    const tabs = [
+      { id: "main", label: "Main Metrics" },
+      { id: "derived", label: "Derived Metrics" },
+      { id: "all", label: "All Charts" }
+    ];
+
+    return (
+      <div className="border-b border-gray-200 mb-4">
+        <nav className="-mb-px flex space-x-4">
+          {tabs.map(tab => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`${
+                activeTab === tab.id
+                  ? 'border-blue-500 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              } whitespace-nowrap py-2 px-3 border-b-2 font-medium text-sm`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </nav>
       </div>
     );
   };
@@ -182,19 +252,161 @@ const Dashboard = () => {
     if (!selectedDeviceObj || readings.length === 0) {
       return (
         <div className="bg-white p-6 rounded-lg shadow-md mt-6">
-          <h2 className="text-xl font-semibold mb-4">Temperature & Humidity Charts</h2>
+          <h2 className="text-xl font-semibold mb-4">Measurements Charts</h2>
           <p className="text-gray-500">Select a device to view charts</p>
         </div>
       );
     }
+
+    // Render main metrics charts (temperature and humidity)
+    const renderMainCharts = () => (
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+        {/* Temperature Chart */}
+        <div className="h-64">
+          <h3 className="text-lg font-medium mb-2">Temperature (°C)</h3>
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart
+              data={readings}
+              margin={{ top: 5, right: 30, left: 0, bottom: 5 }}
+            >
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="time" />
+              <YAxis domain={['auto', 'auto']} />
+              <Tooltip />
+              <Legend />
+              <Line 
+                type="monotone" 
+                dataKey="temperature" 
+                stroke="#8884d8" 
+                activeDot={{ r: 8 }} 
+                name="Temperature (°C)"
+              />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+        
+        {/* Humidity Chart */}
+        <div className="h-64">
+          <h3 className="text-lg font-medium mb-2">Humidity (%)</h3>
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart
+              data={readings}
+              margin={{ top: 5, right: 30, left: 0, bottom: 5 }}
+            >
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="time" />
+              <YAxis domain={[0, 100]} />
+              <Tooltip />
+              <Legend />
+              <Line 
+                type="monotone" 
+                dataKey="humidity" 
+                stroke="#82ca9d" 
+                activeDot={{ r: 8 }} 
+                name="Humidity (%)"
+              />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+    );
+
+    // Render derived metrics charts
+    const renderDerivedCharts = () => (
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+        {/* Dew Point Chart */}
+        <div className="h-64">
+          <h3 className="text-lg font-medium mb-2">Dew Point (°C)</h3>
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart
+              data={readings}
+              margin={{ top: 5, right: 30, left: 0, bottom: 5 }}
+            >
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="time" />
+              <YAxis domain={['auto', 'auto']} />
+              <Tooltip />
+              <Legend />
+              <Line 
+                type="monotone" 
+                dataKey="dewPoint" 
+                stroke="#ff7300" 
+                activeDot={{ r: 8 }} 
+                name="Dew Point (°C)"
+              />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+        
+        {/* Absolute Humidity Chart */}
+        <div className="h-64">
+          <h3 className="text-lg font-medium mb-2">Absolute Humidity (g/m³)</h3>
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart
+              data={readings}
+              margin={{ top: 5, right: 30, left: 0, bottom: 5 }}
+            >
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="time" />
+              <YAxis domain={['auto', 'auto']} />
+              <Tooltip />
+              <Legend />
+              <Line 
+                type="monotone" 
+                dataKey="absHumidity" 
+                stroke="#0088fe" 
+                activeDot={{ r: 8 }} 
+                name="Absolute Humidity (g/m³)"
+              />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+        
+        {/* Steam Pressure Chart */}
+        <div className="h-64 lg:col-span-2">
+          <h3 className="text-lg font-medium mb-2">Steam Pressure (hPa)</h3>
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart
+              data={readings}
+              margin={{ top: 5, right: 30, left: 0, bottom: 5 }}
+            >
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="time" />
+              <YAxis domain={['auto', 'auto']} />
+              <Tooltip />
+              <Legend />
+              <Line 
+                type="monotone" 
+                dataKey="steamPressure" 
+                stroke="#8884d8" 
+                activeDot={{ r: 8 }} 
+                name="Steam Pressure (hPa)"
+              />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+    );
     
     return (
       <div className="bg-white p-6 rounded-lg shadow-md mt-6">
-        <h2 className="text-xl font-semibold mb-4">Temperature & Humidity Charts</h2>
+        <h2 className="text-xl font-semibold mb-4">Measurements Charts</h2>
         
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <ChartTabs />
+        
+        {activeTab === "main" && renderMainCharts()}
+        {activeTab === "derived" && renderDerivedCharts()}
+        {activeTab === "all" && (
+          <>
+            {renderMainCharts()}
+            {renderDerivedCharts()}
+          </>
+        )}
+        
+        {/* Battery Chart */}
+        <div className="grid grid-cols-1 mt-6">
           <div className="h-64">
-            <h3 className="text-lg font-medium mb-2">Temperature (°C)</h3>
+            <h3 className="text-lg font-medium mb-2">Battery Level (%)</h3>
             <ResponsiveContainer width="100%" height="100%">
               <LineChart
                 data={readings}
@@ -207,10 +419,10 @@ const Dashboard = () => {
                 <Legend />
                 <Line 
                   type="monotone" 
-                  dataKey="humidity" 
-                  stroke="#82ca9d" 
+                  dataKey="battery" 
+                  stroke="#ff8042" 
                   activeDot={{ r: 8 }} 
-                  name="Humidity (%)"
+                  name="Battery (%)"
                 />
               </LineChart>
             </ResponsiveContainer>
@@ -299,7 +511,7 @@ const Dashboard = () => {
     <div className="container mx-auto p-4">
       <div className="bg-blue-700 text-white p-4 rounded-lg shadow-md mb-6">
         <h1 className="text-2xl font-bold">Govee Temperature & Humidity Dashboard</h1>
-        <p className="opacity-80">Real-time monitoring of Govee H5075 sensors</p>
+        <p className="opacity-80">Real-time monitoring with enhanced environmental metrics</p>
       </div>
       
       <StatusSection />
@@ -309,27 +521,4 @@ const Dashboard = () => {
       <RefreshControl />
     </div>
   );
-};array="3 3" />
-                <XAxis dataKey="time" />
-                <YAxis domain={['auto', 'auto']} />
-                <Tooltip />
-                <Legend />
-                <Line 
-                  type="monotone" 
-                  dataKey="temperature" 
-                  stroke="#8884d8" 
-                  activeDot={{ r: 8 }} 
-                  name="Temperature (°C)"
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-          
-          <div className="h-64">
-            <h3 className="text-lg font-medium mb-2">Humidity (%)</h3>
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart
-                data={readings}
-                margin={{ top: 5, right: 30, left: 0, bottom: 5 }}
-              >
-                <CartesianGrid strokeDash
+};

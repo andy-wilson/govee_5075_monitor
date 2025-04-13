@@ -13,7 +13,7 @@ This guide will help you get the Govee Monitoring System up and running quickly.
 
 1. Build the client:
    ```bash
-   go build -o govee-client govee-client.go
+   go build -o govee-client govee_5075_client.go
    ```
 
 2. Run the client in discovery mode:
@@ -35,7 +35,7 @@ This guide will help you get the Govee Monitoring System up and running quickly.
 
 1. Build the server:
    ```bash
-   go build -o govee-server govee-server.go
+   go build -o govee-server govee_5075_server.go
    ```
 
 2. Create required directories:
@@ -80,9 +80,9 @@ This guide will help you get the Govee Monitoring System up and running quickly.
    ./govee-client -server=http://server-address:8080/readings -apikey=xyz789abc123def -id=client-livingroom -continuous=true
    ```
 
-2. You should see temperature and humidity readings start to appear:
+2. You should see temperature, humidity, and the enhanced metrics appear:
    ```
-   2023-04-09T15:35:20 GVH5075_1234 Temp: 22.5°C/72.5°F, Humidity: 45.5%, Battery: 87%, RSSI: -67dBm
+   2023-04-09T15:35:20 GVH5075_1234 Temp: 22.5°C/72.5°F, Humidity: 45.5%, Dew Point: 10.2°C, AH: 9.1 g/m³, SP: 12.3 hPa, Battery: 87%, RSSI: -67dBm
    ```
 
 ## Step 5: Access the Dashboard
@@ -94,7 +94,32 @@ This guide will help you get the Govee Monitoring System up and running quickly.
 
 2. You should see the dashboard with your devices and readings.
 
-3. Select a device from the dropdown to view detailed information and charts.
+3. Select a device from the dropdown to view detailed information and charts for all metrics.
+
+## Using Enhanced Features
+
+### Sensor Calibration
+
+If you need to calibrate your sensors, use the offset parameters:
+
+```bash
+./govee-client -temp-offset=-0.5 -humidity-offset=2.0 -continuous=true
+```
+
+This will:
+- Subtract 0.5°C from temperature readings
+- Add 2.0% to humidity readings
+- Calculate all derived metrics using these adjusted values
+
+### Local Monitoring
+
+To use the enhanced metrics without sending data to a server:
+
+```bash
+./govee-client -local=true -continuous=true
+```
+
+This will display all enhanced metrics (dew point, absolute humidity, steam pressure) in standalone mode.
 
 ## Optional: Run in Docker
 
@@ -119,7 +144,10 @@ This guide will help you get the Govee Monitoring System up and running quickly.
 
 2. Run the container with host network to access Bluetooth:
    ```bash
-   docker run --net=host -e SERVER_URL=http://server-address:8080/readings -e CLIENT_ID=client-livingroom -e APIKEY=xyz789abc123def govee-client
+   docker run --net=host -e SERVER_URL=http://server-address:8080/readings \
+     -e CLIENT_ID=client-livingroom -e APIKEY=xyz789abc123def \
+     -e TEMP_OFFSET=-0.5 -e HUMIDITY_OFFSET=2.0 \
+     govee-client
    ```
 
 ## Troubleshooting
@@ -128,11 +156,13 @@ This guide will help you get the Govee Monitoring System up and running quickly.
 - **Authentication failed**: Verify the API key and client ID match what's registered on the server
 - **Cannot access dashboard**: Check that static files are in the correct location and server is running
 - **Bluetooth permission issues**: Try running the client with sudo or set appropriate capabilities
+- **Incorrect readings**: Try calibrating with the offset parameters to match a reference instrument
 
 ## What's Next?
 
 - Add more clients to monitor different areas
 - Set up InfluxDB and Grafana for advanced data visualization
 - Configure Docker Compose for easier deployment
+- Explore the enhanced metrics to optimize your environment
 
-For more detailed information, refer to the full [README.md](README.md) and [Authentication Guide](Authentication-Guide.md).
+For more detailed information, refer to the full [README.md](README.md), [Authentication Guide](Authentication-Guide.md), and [Enhanced Metrics Guide](Enhanced-Metrics-Guide.md).

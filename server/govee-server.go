@@ -17,30 +17,42 @@ import (
 
 // Reading represents a single measurement from a Govee device
 type Reading struct {
-	DeviceName string    `json:"device_name"`
-	DeviceAddr string    `json:"device_addr"`
-	TempC      float64   `json:"temp_c"`
-	TempF      float64   `json:"temp_f"`
-	Humidity   float64   `json:"humidity"`
-	Battery    int       `json:"battery"`
-	RSSI       int       `json:"rssi"`
-	Timestamp  time.Time `json:"timestamp"`
-	ClientID   string    `json:"client_id"`
+	DeviceName     string    `json:"device_name"`
+	DeviceAddr     string    `json:"device_addr"`
+	TempC          float64   `json:"temp_c"`
+	TempF          float64   `json:"temp_f"`
+	TempOffset     float64   `json:"temp_offset"`
+	Humidity       float64   `json:"humidity"`
+	HumidityOffset float64   `json:"humidity_offset"`
+	AbsHumidity    float64   `json:"abs_humidity"`
+	DewPointC      float64   `json:"dew_point_c"`
+	DewPointF      float64   `json:"dew_point_f"`
+	SteamPressure  float64   `json:"steam_pressure"`
+	Battery        int       `json:"battery"`
+	RSSI           int       `json:"rssi"`
+	Timestamp      time.Time `json:"timestamp"`
+	ClientID       string    `json:"client_id"`
 }
 
 // DeviceStatus represents the latest status of a device
 type DeviceStatus struct {
-	DeviceName   string    `json:"device_name"`
-	DeviceAddr   string    `json:"device_addr"`
-	TempC        float64   `json:"temp_c"`
-	TempF        float64   `json:"temp_f"`
-	Humidity     float64   `json:"humidity"`
-	Battery      int       `json:"battery"`
-	RSSI         int       `json:"rssi"`
-	LastUpdate   time.Time `json:"last_update"`
-	ClientID     string    `json:"client_id"`
-	LastSeen     time.Time `json:"last_seen"`
-	ReadingCount int       `json:"reading_count"`
+	DeviceName     string    `json:"device_name"`
+	DeviceAddr     string    `json:"device_addr"`
+	TempC          float64   `json:"temp_c"`
+	TempF          float64   `json:"temp_f"`
+	TempOffset     float64   `json:"temp_offset"`
+	Humidity       float64   `json:"humidity"`
+	HumidityOffset float64   `json:"humidity_offset"`
+	AbsHumidity    float64   `json:"abs_humidity"`
+	DewPointC      float64   `json:"dew_point_c"`
+	DewPointF      float64   `json:"dew_point_f"`
+	SteamPressure  float64   `json:"steam_pressure"`
+	Battery        int       `json:"battery"`
+	RSSI           int       `json:"rssi"`
+	LastUpdate     time.Time `json:"last_update"`
+	ClientID       string    `json:"client_id"`
+	LastSeen       time.Time `json:"last_seen"`
+	ReadingCount   int       `json:"reading_count"`
 }
 
 // ClientStatus represents the latest status of a client
@@ -264,7 +276,13 @@ func (s *Server) addReading(reading Reading) {
 	if device, exists := s.devices[deviceAddr]; exists {
 		device.TempC = reading.TempC
 		device.TempF = reading.TempF
+		device.TempOffset = reading.TempOffset
 		device.Humidity = reading.Humidity
+		device.HumidityOffset = reading.HumidityOffset
+		device.AbsHumidity = reading.AbsHumidity
+		device.DewPointC = reading.DewPointC
+		device.DewPointF = reading.DewPointF
+		device.SteamPressure = reading.SteamPressure
 		device.Battery = reading.Battery
 		device.RSSI = reading.RSSI
 		device.LastUpdate = reading.Timestamp
@@ -273,17 +291,23 @@ func (s *Server) addReading(reading Reading) {
 		device.ReadingCount++
 	} else {
 		s.devices[deviceAddr] = &DeviceStatus{
-			DeviceName:   reading.DeviceName,
-			DeviceAddr:   deviceAddr,
-			TempC:        reading.TempC,
-			TempF:        reading.TempF,
-			Humidity:     reading.Humidity,
-			Battery:      reading.Battery,
-			RSSI:         reading.RSSI,
-			LastUpdate:   reading.Timestamp,
-			LastSeen:     time.Now(),
-			ClientID:     clientID,
-			ReadingCount: 1,
+			DeviceName:     reading.DeviceName,
+			DeviceAddr:     deviceAddr,
+			TempC:          reading.TempC,
+			TempF:          reading.TempF,
+			TempOffset:     reading.TempOffset,
+			Humidity:       reading.Humidity,
+			HumidityOffset: reading.HumidityOffset,
+			AbsHumidity:    reading.AbsHumidity,
+			DewPointC:      reading.DewPointC,
+			DewPointF:      reading.DewPointF,
+			SteamPressure:  reading.SteamPressure,
+			Battery:        reading.Battery,
+			RSSI:           reading.RSSI,
+			LastUpdate:     reading.Timestamp,
+			LastSeen:       time.Now(),
+			ClientID:       clientID,
+			ReadingCount:   1,
 		}
 	}
 
@@ -380,14 +404,20 @@ func (s *Server) getDeviceStats(deviceAddr string) map[string]interface{} {
 
 	stats := make(map[string]interface{})
 	if readings, exists := s.readings[deviceAddr]; exists && len(readings) > 0 {
-		// Calculate min, max, avg for temperature and humidity
-		var sumTempC, sumHumidity float64
+		// Calculate min, max, avg for primary metrics
+		var sumTempC, sumHumidity, sumAbsHumidity, sumDewPointC, sumSteamPressure float64
 		var minTempC, maxTempC = readings[0].TempC, readings[0].TempC
 		var minHumidity, maxHumidity = readings[0].Humidity, readings[0].Humidity
+		var minDewPointC, maxDewPointC = readings[0].DewPointC, readings[0].DewPointC
+		var minAbsHumidity, maxAbsHumidity = readings[0].AbsHumidity, readings[0].AbsHumidity
+		var minSteamPressure, maxSteamPressure = readings[0].SteamPressure, readings[0].SteamPressure
 
 		for _, r := range readings {
 			sumTempC += r.TempC
 			sumHumidity += r.Humidity
+			sumDewPointC += r.DewPointC
+			sumAbsHumidity += r.AbsHumidity
+			sumSteamPressure += r.SteamPressure
 
 			if r.TempC < minTempC {
 				minTempC = r.TempC
@@ -401,16 +431,53 @@ func (s *Server) getDeviceStats(deviceAddr string) map[string]interface{} {
 			if r.Humidity > maxHumidity {
 				maxHumidity = r.Humidity
 			}
+			if r.DewPointC < minDewPointC {
+				minDewPointC = r.DewPointC
+			}
+			if r.DewPointC > maxDewPointC {
+				maxDewPointC = r.DewPointC
+			}
+			if r.AbsHumidity < minAbsHumidity {
+				minAbsHumidity = r.AbsHumidity
+			}
+			if r.AbsHumidity > maxAbsHumidity {
+				maxAbsHumidity = r.AbsHumidity
+			}
+			if r.SteamPressure < minSteamPressure {
+				minSteamPressure = r.SteamPressure
+			}
+			if r.SteamPressure > maxSteamPressure {
+				maxSteamPressure = r.SteamPressure
+			}
 		}
 
 		count := float64(len(readings))
 		stats["count"] = len(readings)
+
+		// Temperature stats
 		stats["temp_c_min"] = minTempC
 		stats["temp_c_max"] = maxTempC
 		stats["temp_c_avg"] = sumTempC / count
+
+		// Humidity stats
 		stats["humidity_min"] = minHumidity
 		stats["humidity_max"] = maxHumidity
 		stats["humidity_avg"] = sumHumidity / count
+
+		// Dew point stats
+		stats["dew_point_c_min"] = minDewPointC
+		stats["dew_point_c_max"] = maxDewPointC
+		stats["dew_point_c_avg"] = sumDewPointC / count
+
+		// Absolute humidity stats
+		stats["abs_humidity_min"] = minAbsHumidity
+		stats["abs_humidity_max"] = maxAbsHumidity
+		stats["abs_humidity_avg"] = sumAbsHumidity / count
+
+		// Steam pressure stats
+		stats["steam_pressure_min"] = minSteamPressure
+		stats["steam_pressure_max"] = maxSteamPressure
+		stats["steam_pressure_avg"] = sumSteamPressure / count
 
 		// Add first and last readings timestamps
 		stats["first_reading"] = readings[0].Timestamp

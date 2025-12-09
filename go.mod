@@ -4,6 +4,7 @@ go 1.22
 
 require (
 	github.com/go-ble/ble v0.0.0-20230130210458-dd4b07d15402
+	github.com/mattn/go-sqlite3 v1.14.22
 	github.com/pkg/errors v0.9.1
 	golang.org/x/time v0.5.0
 )
@@ -16,5 +17,6 @@ require (
 	github.com/mgutz/logxi v0.0.0-20161027140823-aebf8a7d67ab // indirect
 	github.com/raff/goble v0.0.0-20200327175727-d63360dcfd80 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
+	github.com/stretchr/testify v1.8.1 // indirect
 	golang.org/x/sys v0.16.0 // indirect
 )

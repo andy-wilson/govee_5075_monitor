@@ -7,7 +7,12 @@ services:
       dockerfile: Dockerfile
     network_mode: host
     restart: unless-stopped
-    privileged: true
+    # Use specific capabilities instead of privileged mode for better security
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
     environment:
       - SERVER_URL=https://server-address:8080/readings
       - CLIENT_ID=client-livingroom
@@ -19,6 +24,15 @@ services:
       - HUMIDITY_OFFSET=0.0
       - INSECURE=false
       - CA_CERT=/app/certs/ca.crt
+      - HTTP_TIMEOUT=10s
     volumes:
       - ./logs:/logs
       - ./certs:/app/certs
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 128M

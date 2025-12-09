@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -13,10 +16,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/time/rate"
 )
 
 // Reading represents a single measurement from a Govee device
@@ -107,6 +113,38 @@ type Server struct {
 	auth *AuthConfig
 	// Storage manager
 	storageManager *StorageManager
+	// Shutdown context
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
+	// Rate limiter
+	rateLimiter *RateLimiter
+}
+
+// RateLimiter tracks rate limits per IP address
+type RateLimiter struct {
+	limiters map[string]*rate.Limiter
+	mu       sync.Mutex
+}
+
+// NewRateLimiter creates a new rate limiter
+func NewRateLimiter() *RateLimiter {
+	return &RateLimiter{
+		limiters: make(map[string]*rate.Limiter),
+	}
+}
+
+// GetLimiter returns the rate limiter for an IP address
+func (rl *RateLimiter) GetLimiter(ip string) *rate.Limiter {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	limiter, exists := rl.limiters[ip]
+	if !exists {
+		limiter = rate.NewLimiter(10, 20) // 10 req/sec, burst 20
+		rl.limiters[ip] = limiter
+	}
+
+	return limiter
 }
 
 // Config represents server configuration
@@ -146,6 +184,52 @@ func NewStorageManager(config *StorageConfig) *StorageManager {
 	}
 }
 
+// sanitizeDeviceAddr validates and sanitizes device MAC addresses to prevent path traversal
+func sanitizeDeviceAddr(addr string) (string, error) {
+	// MAC address format: XX:XX:XX:XX:XX:XX or XXXXXXXXXXXX
+	matched, _ := regexp.MatchString(`^[0-9A-Fa-f:]{12,17}$`, addr)
+	if !matched {
+		return "", fmt.Errorf("invalid device address format")
+	}
+	// Remove colons and convert to lowercase for consistent filenames
+	sanitized := strings.ReplaceAll(strings.ToLower(addr), ":", "")
+	return sanitized, nil
+}
+
+// validateReading validates sensor reading values
+func validateReading(r *Reading) error {
+	if r.TempC < -50 || r.TempC > 100 {
+		return fmt.Errorf("temperature out of range: %.1f°C", r.TempC)
+	}
+	if r.Humidity < 0 || r.Humidity > 100 {
+		return fmt.Errorf("humidity out of range: %.1f%%", r.Humidity)
+	}
+	if r.Battery < 0 || r.Battery > 100 {
+		return fmt.Errorf("battery out of range: %d%%", r.Battery)
+	}
+	if len(r.DeviceName) > 100 {
+		return fmt.Errorf("device name too long")
+	}
+	if len(r.DeviceAddr) == 0 {
+		return fmt.Errorf("device address required")
+	}
+	if len(r.ClientID) == 0 {
+		return fmt.Errorf("client ID required")
+	}
+	if len(r.ClientID) > 100 {
+		return fmt.Errorf("client ID too long")
+	}
+	// Timestamp should be recent (within 24 hours)
+	now := time.Now()
+	if r.Timestamp.After(now.Add(time.Hour)) {
+		return fmt.Errorf("timestamp in future")
+	}
+	if r.Timestamp.Before(now.Add(-24 * time.Hour)) {
+		return fmt.Errorf("timestamp too old")
+	}
+	return nil
+}
+
 // getPartitionDirForTime returns the directory path for a specific time
 func (sm *StorageManager) getPartitionDirForTime(t time.Time) string {
 	if !sm.config.TimePartitioning {
@@ -180,6 +264,12 @@ func (sm *StorageManager) saveReadings(deviceAddr string, readings []Reading) er
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
+	// Sanitize device address to prevent path traversal
+	sanitizedAddr, err := sanitizeDeviceAddr(deviceAddr)
+	if err != nil {
+		return fmt.Errorf("invalid device address: %v", err)
+	}
+
 	// Get the current partition directory
 	partitionDir := sm.getCurrentPartitionDir()
 
@@ -188,11 +278,11 @@ func (sm *StorageManager) saveReadings(deviceAddr string, readings []Reading) er
 		return fmt.Errorf("failed to create partition directory: %v", err)
 	}
 
-	// Create the device file path
-	deviceFile := filepath.Join(partitionDir, fmt.Sprintf("readings_%s.json", deviceAddr))
+	// Create the device file path with sanitized address
+	deviceFile := filepath.Join(partitionDir, fmt.Sprintf("readings_%s.json", sanitizedAddr))
 
-	// Serialize and save the readings
-	readingsData, err := json.MarshalIndent(readings, "", "  ")
+	// Serialize and save the readings (compact JSON for efficiency)
+	readingsData, err := json.Marshal(readings)
 	if err != nil {
 		return fmt.Errorf("failed to marshal readings for device %s: %v", deviceAddr, err)
 	}
@@ -209,11 +299,17 @@ func (sm *StorageManager) loadReadings(deviceAddr string, fromTime, toTime time.
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
+	// Sanitize device address to prevent path traversal
+	sanitizedAddr, err := sanitizeDeviceAddr(deviceAddr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid device address: %v", err)
+	}
+
 	var allReadings []Reading
 
 	// If not using time partitioning, just load from the base directory
 	if !sm.config.TimePartitioning {
-		deviceFile := filepath.Join(sm.config.BaseDir, fmt.Sprintf("readings_%s.json", deviceAddr))
+		deviceFile := filepath.Join(sm.config.BaseDir, fmt.Sprintf("readings_%s.json", sanitizedAddr))
 		readings, err := sm.loadReadingsFromFile(deviceFile)
 		if err != nil && !os.IsNotExist(err) {
 			return nil, err
@@ -235,7 +331,7 @@ func (sm *StorageManager) loadReadings(deviceAddr string, fromTime, toTime time.
 			// Only include partitions in the time range
 			if (fromTime.IsZero() || partition >= startPartition) &&
 				(toTime.IsZero() || partition <= endPartition) {
-				deviceFile := filepath.Join(partition, fmt.Sprintf("readings_%s.json", deviceAddr))
+				deviceFile := filepath.Join(partition, fmt.Sprintf("readings_%s.json", sanitizedAddr))
 				readings, err := sm.loadReadingsFromFile(deviceFile)
 				if err != nil && !os.IsNotExist(err) {
 					return nil, err
@@ -488,6 +584,8 @@ func (sm *StorageManager) compressPartition(partitionDir string) error {
 
 // NewServer creates a new Govee server instance
 func NewServer(config *Config, auth *AuthConfig, storageManager *StorageManager) *Server {
+	ctx, cancel := context.WithCancel(context.Background())
+
 	s := &Server{
 		devices:        make(map[string]*DeviceStatus),
 		clients:        make(map[string]*ClientStatus),
@@ -495,6 +593,9 @@ func NewServer(config *Config, auth *AuthConfig, storageManager *StorageManager)
 		config:         config,
 		auth:           auth,
 		storageManager: storageManager,
+		shutdownCtx:    ctx,
+		shutdownCancel: cancel,
+		rateLimiter:    NewRateLimiter(),
 	}
 
 	// Initialize logging if configured
@@ -516,30 +617,55 @@ func NewServer(config *Config, auth *AuthConfig, storageManager *StorageManager)
 		}
 
 		// Start background save routine
-		go s.startPersistence()
+		go s.startPersistence(ctx)
 	}
 
 	// Start client timeout check routine
-	go s.checkClientTimeouts()
+	go s.checkClientTimeouts(ctx)
 
 	return s
 }
 
 // startPersistence starts the background routine for data persistence
-func (s *Server) startPersistence() {
+func (s *Server) startPersistence(ctx context.Context) {
 	ticker := time.NewTicker(s.config.SaveInterval)
-	for range ticker.C {
-		s.saveData()
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			s.saveData()
+		case <-ctx.Done():
+			log.Println("Persistence routine shutting down")
+			return
+		}
 	}
 }
 
-// saveData saves current server state to disk
+// saveData saves current server state to disk (optimized to minimize lock time)
 func (s *Server) saveData() {
+	// Take snapshot under read lock (fast)
 	s.mu.RLock()
-	defer s.mu.RUnlock()
+	devicesCopy := make(map[string]*DeviceStatus, len(s.devices))
+	for k, v := range s.devices {
+		devicesCopy[k] = v
+	}
+	clientsCopy := make(map[string]*ClientStatus, len(s.clients))
+	for k, v := range s.clients {
+		clientsCopy[k] = v
+	}
+	readingsCopy := make(map[string][]Reading, len(s.readings))
+	for k, v := range s.readings {
+		readingsCopy[k] = v
+	}
+	authCopy := s.auth
+	enableAuth := s.auth.EnableAuth
+	s.mu.RUnlock()
+
+	// Now perform all I/O operations without holding the lock
 
 	// Save device statuses
-	devicesData, err := json.MarshalIndent(s.devices, "", "  ")
+	devicesData, err := json.MarshalIndent(devicesCopy, "", "  ")
 	if err != nil {
 		log.Printf("Failed to marshal devices data: %v", err)
 	} else {
@@ -549,7 +675,7 @@ func (s *Server) saveData() {
 	}
 
 	// Save client statuses
-	clientsData, err := json.MarshalIndent(s.clients, "", "  ")
+	clientsData, err := json.MarshalIndent(clientsCopy, "", "  ")
 	if err != nil {
 		log.Printf("Failed to marshal clients data: %v", err)
 	} else {
@@ -559,8 +685,8 @@ func (s *Server) saveData() {
 	}
 
 	// Save API keys if auth is enabled
-	if s.auth.EnableAuth {
-		authData, err := json.MarshalIndent(s.auth, "", "  ")
+	if enableAuth {
+		authData, err := json.MarshalIndent(authCopy, "", "  ")
 		if err != nil {
 			log.Printf("Failed to marshal auth data: %v", err)
 		} else {
@@ -571,7 +697,7 @@ func (s *Server) saveData() {
 	}
 
 	// Save recent readings for each device using the storage manager
-	for deviceAddr, deviceReadings := range s.readings {
+	for deviceAddr, deviceReadings := range readingsCopy {
 		if len(deviceReadings) > 0 {
 			err := s.storageManager.saveReadings(deviceAddr, deviceReadings)
 			if err != nil {
@@ -626,19 +752,46 @@ func (s *Server) loadData() {
 	}
 }
 
-// checkClientTimeouts periodically checks for inactive clients
-func (s *Server) checkClientTimeouts() {
+// checkClientTimeouts periodically checks for inactive clients and cleans up old data
+func (s *Server) checkClientTimeouts(ctx context.Context) {
 	ticker := time.NewTicker(1 * time.Minute)
-	for range ticker.C {
-		s.mu.Lock()
-		now := time.Now()
-		for clientID, client := range s.clients {
-			if now.Sub(client.LastSeen) > s.config.ClientTimeout {
-				client.IsActive = false
-				log.Printf("Client %s marked as inactive (timeout: %v)", clientID, s.config.ClientTimeout)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			s.mu.Lock()
+			now := time.Now()
+
+			// Mark inactive clients
+			for clientID, client := range s.clients {
+				if now.Sub(client.LastSeen) > s.config.ClientTimeout {
+					client.IsActive = false
+					log.Printf("Client %s marked as inactive (timeout: %v)", clientID, s.config.ClientTimeout)
+				}
+
+				// Remove very old inactive clients (10x timeout)
+				if now.Sub(client.LastSeen) > s.config.ClientTimeout*10 {
+					delete(s.clients, clientID)
+					log.Printf("Removed stale client: %s", clientID)
+				}
 			}
+
+			// Clean up very old devices (30 days)
+			for deviceAddr, device := range s.devices {
+				if now.Sub(device.LastSeen) > 30*24*time.Hour {
+					delete(s.devices, deviceAddr)
+					delete(s.readings, deviceAddr)
+					log.Printf("Removed stale device: %s", deviceAddr)
+				}
+			}
+
+			s.mu.Unlock()
+
+		case <-ctx.Done():
+			log.Println("Client timeout checker shutting down")
+			return
 		}
-		s.mu.Unlock()
 	}
 }
 
@@ -649,6 +802,9 @@ func (s *Server) addReading(reading Reading) {
 
 	deviceAddr := reading.DeviceAddr
 	clientID := reading.ClientID
+
+	// Track if this is a new device
+	_, deviceExists := s.devices[deviceAddr]
 
 	// Update device status
 	if device, exists := s.devices[deviceAddr]; exists {
@@ -689,7 +845,7 @@ func (s *Server) addReading(reading Reading) {
 		}
 	}
 
-	// Update client status
+	// Update or create client status
 	if client, exists := s.clients[clientID]; exists {
 		client.LastSeen = time.Now()
 		client.ReadingCount++
@@ -706,18 +862,11 @@ func (s *Server) addReading(reading Reading) {
 		}
 	}
 
-	// Update client's device count
-	devicesByClient := make(map[string]map[string]bool)
-	for addr, device := range s.devices {
-		if _, exists := devicesByClient[device.ClientID]; !exists {
-			devicesByClient[device.ClientID] = make(map[string]bool)
-		}
-		devicesByClient[device.ClientID][addr] = true
-	}
-
-	for cID, devices := range devicesByClient {
-		if client, exists := s.clients[cID]; exists {
-			client.DeviceCount = len(devices)
+	// Increment device count only when adding a new device
+	// This is much more efficient than recalculating all counts every time
+	if !deviceExists && clientID != "" {
+		if client, exists := s.clients[clientID]; exists {
+			client.DeviceCount++
 		}
 	}
 
@@ -869,6 +1018,32 @@ func (s *Server) getDeviceStats(deviceAddr string) map[string]interface{} {
 	return stats
 }
 
+// rateLimitMiddleware enforces rate limiting per IP address
+func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Skip rate limiting for health checks
+		if r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Get IP address (handle X-Forwarded-For for proxies)
+		ip := r.RemoteAddr
+		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+			ip = strings.Split(forwarded, ",")[0]
+		}
+
+		limiter := s.rateLimiter.GetLimiter(ip)
+		if !limiter.Allow() {
+			http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
+			log.Printf("Rate limit exceeded for IP: %s", ip)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 // Authentication middleware
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -912,39 +1087,43 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		clientID, valid := s.auth.APIKeys[apiKey]
 		if !valid {
 			http.Error(w, "Unauthorized: Invalid API key", http.StatusUnauthorized)
-			log.Printf("Authentication failed: Invalid API key from %s", r.RemoteAddr)
+			log.Printf("Authentication failed from %s", r.RemoteAddr)
 			return
 		}
 
-		// For POST to /readings, check if the client ID in the request matches the one associated with the API key
+		// For POST to /readings, validate client ID and preserve request body
 		if r.Method == "POST" && r.URL.Path == "/readings" {
-			var reading Reading
-			if err := json.NewDecoder(r.Body).Decode(&reading); err == nil {
-				if reading.ClientID != clientID {
-					http.Error(w, "Unauthorized: Client ID mismatch", http.StatusUnauthorized)
-					log.Printf("Authentication failed: Client ID mismatch (key: %s, got: %s, expected: %s) from %s",
-						apiKey, reading.ClientID, clientID, r.RemoteAddr)
-					return
-				}
-				// Rewind the body for the actual handler
-				r.Body.Close()
-				jsonData, _ := json.Marshal(reading)
-				r.Body = &readCloser{Reader: strings.NewReader(string(jsonData))}
+			// Read body once
+			bodyBytes, err := io.ReadAll(r.Body)
+			r.Body.Close()
+			if err != nil {
+				http.Error(w, "Failed to read request body", http.StatusBadRequest)
+				log.Printf("Failed to read request body: %v", err)
+				return
 			}
+
+			// Parse JSON
+			var reading Reading
+			if err := json.Unmarshal(bodyBytes, &reading); err != nil {
+				http.Error(w, "Invalid JSON in request body", http.StatusBadRequest)
+				log.Printf("Invalid JSON from %s: %v", r.RemoteAddr, err)
+				return
+			}
+
+			// Validate client ID matches API key
+			if reading.ClientID != clientID {
+				http.Error(w, "Unauthorized: Client ID mismatch", http.StatusUnauthorized)
+				log.Printf("Client ID mismatch from %s", r.RemoteAddr)
+				return
+			}
+
+			// Restore body for handler
+			r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 		}
 
 		// API key is valid
 		next.ServeHTTP(w, r)
 	})
-}
-
-// readCloser is a helper type that implements io.ReadCloser for request body rewinding
-type readCloser struct {
-	io.Reader
-}
-
-func (rc *readCloser) Close() error {
-	return nil
 }
 
 // handlers for HTTP endpoints
@@ -958,6 +1137,14 @@ func (s *Server) handleReadings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid request body", http.StatusBadRequest)
 			return
 		}
+
+		// Validate reading
+		if err := validateReading(&reading); err != nil {
+			http.Error(w, fmt.Sprintf("Invalid reading: %v", err), http.StatusBadRequest)
+			log.Printf("Invalid reading from %s: %v", r.RemoteAddr, err)
+			return
+		}
+
 		s.addReading(reading)
 		w.WriteHeader(http.StatusCreated)
 
@@ -998,7 +1185,7 @@ func (s *Server) handleReadings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		json.NewEncoder(w).Encode(readings)
+		respondJSON(w, readings)
 
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -1011,7 +1198,7 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	devices := s.getDevices()
-	json.NewEncoder(w).Encode(devices)
+	respondJSON(w, devices)
 }
 
 func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
@@ -1020,7 +1207,7 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	clients := s.getClients()
-	json.NewEncoder(w).Encode(clients)
+	respondJSON(w, clients)
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
@@ -1036,7 +1223,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	stats := s.getDeviceStats(deviceAddr)
-	json.NewEncoder(w).Encode(stats)
+	respondJSON(w, stats)
 }
 
 func (s *Server) handleDashboardData(w http.ResponseWriter, r *http.Request) {
@@ -1091,7 +1278,7 @@ func (s *Server) handleDashboardData(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	json.NewEncoder(w).Encode(dashboardData)
+	respondJSON(w, dashboardData)
 }
 
 // handleAPIKeys handles API key management
@@ -1104,7 +1291,7 @@ func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
 		for k, v := range s.auth.APIKeys {
 			keys[k] = v
 		}
-		json.NewEncoder(w).Encode(keys)
+		respondJSON(w, keys)
 
 	case "POST":
 		// Create new API key
@@ -1135,7 +1322,7 @@ func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
 
 		// Return the new key
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]string{
+		respondJSON(w, map[string]string{
 			"api_key":   newKey,
 			"client_id": keyData.ClientID,
 		})
@@ -1181,17 +1368,22 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("OK"))
 }
 
-// generateAPIKey creates a new random API key
+// generateAPIKey creates a new cryptographically secure random API key
 func generateAPIKey() string {
-	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	const keyLength = 32
-
-	b := make([]byte, keyLength)
-	for i := range b {
-		b[i] = charset[uint8(os.Getpid()+int(time.Now().UnixNano()))%uint8(len(charset))]
-		time.Sleep(1 * time.Nanosecond) // Ensure uniqueness
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		log.Fatalf("Failed to generate random API key: %v", err)
 	}
-	return string(b)
+	return base64.URLEncoding.EncodeToString(b)
+}
+
+// respondJSON encodes data as JSON and handles errors properly
+func respondJSON(w http.ResponseWriter, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		log.Printf("Failed to encode JSON response: %v", err)
+		// Response already started, can't change status code
+	}
 }
 
 // handleStaticFiles serves the static files for the dashboard
@@ -1241,18 +1433,20 @@ func main() {
 	if auth.EnableAuth {
 		if *adminKey == "" {
 			auth.AdminKey = generateAPIKey()
-			log.Printf("Generated admin API key: %s", auth.AdminKey)
+			log.Printf("Generated admin API key: %s... (copy from data/auth.json)", auth.AdminKey[:12])
 		} else {
 			auth.AdminKey = *adminKey
+			log.Printf("Using provided admin API key: %s...", auth.AdminKey[:12])
 		}
 
 		// Generate default key if allowed and not provided
 		if auth.AllowDefaultKey {
 			if *defaultKey == "" {
 				auth.DefaultAPIKey = generateAPIKey()
-				log.Printf("Generated default API key: %s", auth.DefaultAPIKey)
+				log.Printf("Generated default API key: %s... (copy from data/auth.json)", auth.DefaultAPIKey[:12])
 			} else {
 				auth.DefaultAPIKey = *defaultKey
+				log.Printf("Using provided default API key: %s...", auth.DefaultAPIKey[:12])
 			}
 		}
 	}
@@ -1295,9 +1489,17 @@ func main() {
 	// Start a routine to periodically enforce retention
 	go func() {
 		retentionTicker := time.NewTicker(24 * time.Hour) // Check retention daily
-		for range retentionTicker.C {
-			if err := storageManager.enforceRetention(); err != nil {
-				log.Printf("Error enforcing retention: %v", err)
+		defer retentionTicker.Stop()
+
+		for {
+			select {
+			case <-retentionTicker.C:
+				if err := storageManager.enforceRetention(); err != nil {
+					log.Printf("Error enforcing retention: %v", err)
+				}
+			case <-server.shutdownCtx.Done():
+				log.Println("Retention routine shutting down")
+				return
 			}
 		}
 	}()
@@ -1305,17 +1507,18 @@ func main() {
 	// Create HTTP server
 	mux := http.NewServeMux()
 
-	// Create auth middleware
+	// Create middleware chain: rate limit -> auth
+	rateLimitMiddleware := server.rateLimitMiddleware
 	authMiddleware := server.authMiddleware
 
-	// API endpoints
-	mux.Handle("/readings", authMiddleware(http.HandlerFunc(server.handleReadings)))
-	mux.Handle("/devices", authMiddleware(http.HandlerFunc(server.handleDevices)))
-	mux.Handle("/clients", authMiddleware(http.HandlerFunc(server.handleClients)))
-	mux.Handle("/stats", authMiddleware(http.HandlerFunc(server.handleStats)))
-	mux.Handle("/dashboard/data", authMiddleware(http.HandlerFunc(server.handleDashboardData)))
-	mux.Handle("/api/keys", authMiddleware(http.HandlerFunc(server.handleAPIKeys)))
-	mux.Handle("/health", http.HandlerFunc(server.handleHealthCheck))
+	// API endpoints with rate limiting and authentication
+	mux.Handle("/readings", rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleReadings))))
+	mux.Handle("/devices", rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleDevices))))
+	mux.Handle("/clients", rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleClients))))
+	mux.Handle("/stats", rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleStats))))
+	mux.Handle("/dashboard/data", rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleDashboardData))))
+	mux.Handle("/api/keys", rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleAPIKeys))))
+	mux.Handle("/health", rateLimitMiddleware(http.HandlerFunc(server.handleHealthCheck)))
 
 	// Serve static files for dashboard
 	mux.Handle("/", handleStaticFiles(*staticDir))
@@ -1381,12 +1584,15 @@ func main() {
 
 	log.Println("Shutting down server...")
 
+	// Stop background goroutines
+	server.shutdownCancel()
+
 	// Save data before shutting down
 	if config.PersistenceEnabled {
 		server.saveData()
 	}
 
-	// Create a deadline for shutdown
+	// Create a deadline for HTTP server shutdown
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 

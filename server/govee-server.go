@@ -196,8 +196,32 @@ func sanitizeDeviceAddr(addr string) (string, error) {
 	return sanitized, nil
 }
 
+// sanitizeDeviceName validates and sanitizes device names to prevent XSS
+func sanitizeDeviceName(name string) (string, error) {
+	// Device name should only contain alphanumeric, spaces, hyphens, underscores, and basic punctuation
+	// This prevents XSS attacks through device names
+	matched, _ := regexp.MatchString(`^[a-zA-Z0-9 _\-\.()]+$`, name)
+	if !matched {
+		return "", fmt.Errorf("device name contains invalid characters")
+	}
+	if len(name) == 0 {
+		return "", fmt.Errorf("device name required")
+	}
+	if len(name) > 100 {
+		return "", fmt.Errorf("device name too long (max 100 characters)")
+	}
+	return strings.TrimSpace(name), nil
+}
+
 // validateReading validates sensor reading values
 func validateReading(r *Reading) error {
+	// Validate and sanitize device name to prevent XSS
+	sanitized, err := sanitizeDeviceName(r.DeviceName)
+	if err != nil {
+		return fmt.Errorf("invalid device name: %v", err)
+	}
+	r.DeviceName = sanitized
+
 	if r.TempC < -50 || r.TempC > 100 {
 		return fmt.Errorf("temperature out of range: %.1f°C", r.TempC)
 	}
@@ -206,9 +230,6 @@ func validateReading(r *Reading) error {
 	}
 	if r.Battery < 0 || r.Battery > 100 {
 		return fmt.Errorf("battery out of range: %d%%", r.Battery)
-	}
-	if len(r.DeviceName) > 100 {
-		return fmt.Errorf("device name too long")
 	}
 	if len(r.DeviceAddr) == 0 {
 		return fmt.Errorf("device address required")
@@ -1044,6 +1065,43 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// securityHeadersMiddleware adds security headers to all responses
+func (s *Server) securityHeadersMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Prevent MIME type sniffing
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+
+		// Prevent clickjacking
+		w.Header().Set("X-Frame-Options", "DENY")
+
+		// Enable XSS protection (for older browsers)
+		w.Header().Set("X-XSS-Protection", "1; mode=block")
+
+		// Content Security Policy - restrict resource loading
+		// Allow self for scripts/styles, and specific CDNs for React/charts
+		csp := "default-src 'self'; " +
+			"script-src 'self' 'unsafe-inline' 'unsafe-eval' https://unpkg.com https://cdn.tailwindcss.com; " +
+			"style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; " +
+			"img-src 'self' data:; " +
+			"font-src 'self' data:; " +
+			"connect-src 'self'"
+		w.Header().Set("Content-Security-Policy", csp)
+
+		// Enforce HTTPS (only set if running in HTTPS mode)
+		if r.TLS != nil {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+
+		// Prevent referrer leakage
+		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+
+		// Disable browser features that could be abused
+		w.Header().Set("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 // Authentication middleware
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1507,21 +1565,22 @@ func main() {
 	// Create HTTP server
 	mux := http.NewServeMux()
 
-	// Create middleware chain: rate limit -> auth
+	// Create middleware chain: security headers -> rate limit -> auth
+	securityMiddleware := server.securityHeadersMiddleware
 	rateLimitMiddleware := server.rateLimitMiddleware
 	authMiddleware := server.authMiddleware
 
-	// API endpoints with rate limiting and authentication
-	mux.Handle("/readings", rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleReadings))))
-	mux.Handle("/devices", rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleDevices))))
-	mux.Handle("/clients", rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleClients))))
-	mux.Handle("/stats", rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleStats))))
-	mux.Handle("/dashboard/data", rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleDashboardData))))
-	mux.Handle("/api/keys", rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleAPIKeys))))
-	mux.Handle("/health", rateLimitMiddleware(http.HandlerFunc(server.handleHealthCheck)))
+	// API endpoints with full middleware chain
+	mux.Handle("/readings", securityMiddleware(rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleReadings)))))
+	mux.Handle("/devices", securityMiddleware(rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleDevices)))))
+	mux.Handle("/clients", securityMiddleware(rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleClients)))))
+	mux.Handle("/stats", securityMiddleware(rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleStats)))))
+	mux.Handle("/dashboard/data", securityMiddleware(rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleDashboardData)))))
+	mux.Handle("/api/keys", securityMiddleware(rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleAPIKeys)))))
+	mux.Handle("/health", securityMiddleware(rateLimitMiddleware(http.HandlerFunc(server.handleHealthCheck))))
 
-	// Serve static files for dashboard
-	mux.Handle("/", handleStaticFiles(*staticDir))
+	// Serve static files for dashboard (with security headers)
+	mux.Handle("/", securityMiddleware(handleStaticFiles(*staticDir)))
 
 	var httpServer *http.Server
 

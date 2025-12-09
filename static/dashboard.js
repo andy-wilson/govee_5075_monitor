@@ -9,27 +9,46 @@ const Dashboard = () => {
   const [refreshInterval, setRefreshInterval] = useState(30);
   const [lastUpdated, setLastUpdated] = useState(null);
   const [activeTab, setActiveTab] = useState("main"); // For switching between chart types
+  const [failureCount, setFailureCount] = useState(0);
+  const [hasSelectedBefore, setHasSelectedBefore] = useState(false);
 
-  // Fetch dashboard data
+  // Fetch dashboard data with better error handling
   const fetchDashboardData = async () => {
     try {
       const response = await fetch('/dashboard/data');
+
+      // Handle specific status codes
+      if (response.status === 401) {
+        setError('Authentication required. Please check API key configuration.');
+        setLoading(false);
+        return;
+      }
+      if (response.status === 403) {
+        setError('Access forbidden. Insufficient permissions.');
+        setLoading(false);
+        return;
+      }
       if (!response.ok) {
         throw new Error(`Server responded with ${response.status}`);
       }
+
       const data = await response.json();
       setDashboardData(data);
-      
-      // Select first device as default if none selected
-      if (!selectedDevice && data.devices.length > 0) {
+
+      // Select first device as default on initial load only
+      if (!selectedDevice && data.devices.length > 0 && !hasSelectedBefore) {
         setSelectedDevice(data.devices[0].DeviceAddr);
+        setHasSelectedBefore(true);
       }
-      
+
       setLastUpdated(new Date());
       setLoading(false);
+      setError(null); // Clear any previous errors
+      setFailureCount(0); // Reset failure count on success
     } catch (err) {
       setError(`Failed to fetch dashboard data: ${err.message}`);
       setLoading(false);
+      setFailureCount(c => c + 1); // Increment failure count
     }
   };
 
@@ -38,14 +57,18 @@ const Dashboard = () => {
     fetchDashboardData();
   }, []);
 
-  // Set up periodic refresh
+  // Set up periodic refresh with exponential backoff on failures
   useEffect(() => {
+    const baseInterval = refreshInterval * 1000;
+    const backoffMultiplier = Math.min(Math.pow(2, failureCount), 10);
+    const actualInterval = baseInterval * backoffMultiplier;
+
     const interval = setInterval(() => {
       fetchDashboardData();
-    }, refreshInterval * 1000);
-    
+    }, actualInterval);
+
     return () => clearInterval(interval);
-  }, [refreshInterval]);
+  }, [refreshInterval, failureCount]);
 
   // Format time for display
   const formatTime = (timestamp) => {
@@ -61,12 +84,12 @@ const Dashboard = () => {
     return date.toLocaleDateString();
   };
 
-  // Get readings data for selected device
-  const getDeviceReadings = () => {
+  // Get readings data for selected device (memoized)
+  const deviceReadings = React.useMemo(() => {
     if (!dashboardData || !selectedDevice || !dashboardData.recent_readings[selectedDevice]) {
       return [];
     }
-    
+
     return dashboardData.recent_readings[selectedDevice].map(reading => ({
       time: formatTime(reading.timestamp),
       temperature: reading.temp_c,
@@ -79,13 +102,13 @@ const Dashboard = () => {
       battery: reading.battery,
       timestamp: reading.timestamp
     }));
-  };
+  }, [dashboardData, selectedDevice]);
 
-  // Get the selected device object
-  const getSelectedDeviceObject = () => {
+  // Get the selected device object (memoized)
+  const selectedDeviceObj = React.useMemo(() => {
     if (!dashboardData || !selectedDevice) return null;
     return dashboardData.devices.find(d => d.DeviceAddr === selectedDevice);
-  };
+  }, [dashboardData, selectedDevice]);
 
   // Display system status
   const StatusSection = () => (
@@ -118,7 +141,6 @@ const Dashboard = () => {
 
   // Device selection and display
   const DeviceSection = () => {
-    const selectedDeviceObj = getSelectedDeviceObject();
     
     return (
       <div className="bg-white p-6 rounded-lg shadow-md mt-6">
@@ -246,10 +268,7 @@ const Dashboard = () => {
 
   // Chart section
   const ChartSection = () => {
-    const readings = getDeviceReadings();
-    const selectedDeviceObj = getSelectedDeviceObject();
-    
-    if (!selectedDeviceObj || readings.length === 0) {
+    if (!selectedDeviceObj || deviceReadings.length === 0) {
       return (
         <div className="bg-white p-6 rounded-lg shadow-md mt-6">
           <h2 className="text-xl font-semibold mb-4">Measurements Charts</h2>
@@ -266,7 +285,7 @@ const Dashboard = () => {
           <h3 className="text-lg font-medium mb-2">Temperature (°C)</h3>
           <ResponsiveContainer width="100%" height="100%">
             <LineChart
-              data={readings}
+              data={deviceReadings}
               margin={{ top: 5, right: 30, left: 0, bottom: 5 }}
             >
               <CartesianGrid strokeDasharray="3 3" />
@@ -290,7 +309,7 @@ const Dashboard = () => {
           <h3 className="text-lg font-medium mb-2">Humidity (%)</h3>
           <ResponsiveContainer width="100%" height="100%">
             <LineChart
-              data={readings}
+              data={deviceReadings}
               margin={{ top: 5, right: 30, left: 0, bottom: 5 }}
             >
               <CartesianGrid strokeDasharray="3 3" />
@@ -319,7 +338,7 @@ const Dashboard = () => {
           <h3 className="text-lg font-medium mb-2">Dew Point (°C)</h3>
           <ResponsiveContainer width="100%" height="100%">
             <LineChart
-              data={readings}
+              data={deviceReadings}
               margin={{ top: 5, right: 30, left: 0, bottom: 5 }}
             >
               <CartesianGrid strokeDasharray="3 3" />
@@ -343,7 +362,7 @@ const Dashboard = () => {
           <h3 className="text-lg font-medium mb-2">Absolute Humidity (g/m³)</h3>
           <ResponsiveContainer width="100%" height="100%">
             <LineChart
-              data={readings}
+              data={deviceReadings}
               margin={{ top: 5, right: 30, left: 0, bottom: 5 }}
             >
               <CartesianGrid strokeDasharray="3 3" />
@@ -367,7 +386,7 @@ const Dashboard = () => {
           <h3 className="text-lg font-medium mb-2">Steam Pressure (hPa)</h3>
           <ResponsiveContainer width="100%" height="100%">
             <LineChart
-              data={readings}
+              data={deviceReadings}
               margin={{ top: 5, right: 30, left: 0, bottom: 5 }}
             >
               <CartesianGrid strokeDasharray="3 3" />
@@ -409,7 +428,7 @@ const Dashboard = () => {
             <h3 className="text-lg font-medium mb-2">Battery Level (%)</h3>
             <ResponsiveContainer width="100%" height="100%">
               <LineChart
-                data={readings}
+                data={deviceReadings}
                 margin={{ top: 5, right: 30, left: 0, bottom: 5 }}
               >
                 <CartesianGrid strokeDasharray="3 3" />

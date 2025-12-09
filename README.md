@@ -432,8 +432,8 @@ For more advanced data analysis and visualization, the system includes optional 
 ### Feature Guides
 - **[docs/authentication-guide.md](docs/authentication-guide.md)** - API key setup and management
 - **[docs/data-storage-guide.md](docs/data-storage-guide.md)** - Storage, retention, partitioning
-- **[docs/quick-start-guide.md](docs/quick-start-guide.md)** - Original quick start
-- **[docs/Enhanced-Metrics-Guide.md](docs/Enhanced-Metrics-Guide.md)** - Advanced metrics
+- **[docs/quick-start-guide.md](docs/quick-start-guide.md)** - Manual setup guide
+- **[docs/metrics-guide.md](docs/metrics-guide.md)** - Enhanced environmental metrics
 
 ### API Reference
 - **[openapi.yaml](openapi.yaml)** - OpenAPI v3 specification for REST API

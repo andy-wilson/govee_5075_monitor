@@ -1,13 +1,17 @@
 # Govee Monitoring System - Quick Start Guide
 
-This guide will help you get the Govee 5075 Monitoring System up and running. It is likely full of bugs, but appears to work for me :)
+**Version 2.0** - Manual Setup Guide
+
+> **Note:** For the fastest setup experience, see [QUICKSTART.md](../QUICKSTART.md) in the root directory. This guide provides more detailed manual installation steps.
+
+This guide will help you get the Govee 5075 Monitoring System up and running with manual setup.
 
 ## Prerequisites
 
 - One or more Govee H5075 temperature and humidity sensors
 - A machine with Bluetooth capabilities for the client
 - A server or computer to run the central server
-- Go 1.18+ installed on both machines (or Docker for containerized setup)
+- Go 1.22+ installed on both machines (or Docker for containerized setup)
 
 ## Step 1: Discover Your Govee Devices
 
@@ -160,9 +164,19 @@ This will display all enhanced metrics (dew point, absolute humidity, steam pres
 
 ## What's Next?
 
-- Add more clients to monitor different areas
-- Set up InfluxDB and Grafana for advanced data visualization
-- Configure Docker Compose for easier deployment
-- Explore the enhanced metrics to optimize your environment
+### v2.0 Features to Explore
 
-For more detailed information, refer to the full [README.md](README.md), [Authentication Guide](Authentication-Guide.md), and [Enhanced Metrics Guide](Enhanced-Metrics-Guide.md).
+- **Migrate to SQLite**: Get 10-100x faster queries (see [Data Storage Guide](data-storage-guide.md))
+- **Enable HTTPS**: Secure your deployment (see [Authentication Guide](authentication-guide.md))
+- **Set up CI/CD**: Automated testing and deployment (see [OPTIMIZATION_GUIDE.md](OPTIMIZATION_GUIDE.md))
+- **Add more clients**: Monitor different areas with multiple client instances
+- **Configure InfluxDB + Grafana**: Advanced data visualization and alerting
+- **Optimize Performance**: Dashboard caching and compression are enabled by default
+
+### Documentation
+
+- **[README.md](../README.md)** - Complete system documentation
+- **[QUICKSTART.md](../QUICKSTART.md)** - Fast 5-minute setup
+- **[docs/authentication-guide.md](authentication-guide.md)** - Security setup
+- **[docs/data-storage-guide.md](data-storage-guide.md)** - Storage backends and migration
+- **[docs/OPTIMIZATION_GUIDE.md](OPTIMIZATION_GUIDE.md)** - v2.0 performance guide

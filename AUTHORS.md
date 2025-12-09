@@ -9,4 +9,4 @@ I also wanted to have sensor data reliably available within Home Assistant, so d
 * Andy Wilson [https://github.com/andy-wilson]
 
 ## Special thanks to
-Claude Sonet 3.7 
+Claude Sonnet 3.7 and Claude Sonnet 4.5

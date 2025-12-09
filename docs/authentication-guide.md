@@ -1,15 +1,28 @@
 # Authentication guide for Govee 5075 Monitor
 
-This guide explains the security features of the Govee 5075 Monitoring System, covering both API key authentication and HTTPS encryption.
+**Version 2.0** - Enhanced Security Features
+
+This guide explains the security features of the Govee 5075 Monitoring System, covering API key authentication, HTTPS encryption, and additional security improvements in v2.0.
 
 ## Security Overview
 
-The system implements two complementary layers of security:
+The system implements multiple layers of security:
 
 1. **API Key Authentication** - Verifies that clients are authorized to communicate with the server
 2. **HTTPS/TLS Encryption** - Encrypts all data in transit between clients and the server
+3. **Input Validation** - Prevents XSS, path traversal, and injection attacks (v2.0)
+4. **Security Headers** - Comprehensive HTTP security headers (v2.0)
+5. **Rate Limiting** - Prevents abuse and DoS attacks
 
-For maximum security, both features should be enabled and properly configured.
+For maximum security, all features should be enabled and properly configured.
+
+### New in v2.0
+
+- **Cryptographically Secure API Keys**: Generated using `crypto/rand` for unpredictability
+- **XSS Prevention**: Device names and inputs are validated and sanitized
+- **Security Headers**: CSP, HSTS, X-Frame-Options, and more
+- **Enhanced Health Checks**: Monitor security status via `/health` endpoint
+- **Audit Capabilities**: Better logging for security events
 
 ## API Key Authentication
 

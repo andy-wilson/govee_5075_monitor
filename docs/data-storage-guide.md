@@ -1,26 +1,112 @@
 # Data Storage and Retention Guide
 
-This guide explains how the Govee Monitoring System handles data storage, time-based partitioning, and retention policies for historical data.
+**Version 2.0** - SQLite and Advanced Storage Features
+
+This guide explains how the Govee Monitoring System handles data storage, including the new SQLite backend, storage abstraction layer, time-based partitioning, and retention policies for historical data.
 
 ## Overview
 
-The system now implements advanced data storage features:
+The system implements advanced data storage features with v2.0:
 
-1. **Time-Based Partitioning**: Data is organized into directories based on time periods
-2. **Configurable Retention Policies**: Automatically manage how long data is kept
-3. **Automatic Compression**: Older data can be compressed to save storage space
-4. **Time Range Queries**: Retrieve historical data from specific time periods
+1. **Multiple Storage Backends**: SQLite (recommended) or JSON-based storage
+2. **Storage Abstraction Layer**: Easy migration path to InfluxDB or TimescaleDB
+3. **High Performance**: 10-100x faster queries with SQLite
+4. **Time-Based Partitioning**: Data organized into directories based on time periods (JSON mode)
+5. **Configurable Retention Policies**: Automatically manage how long data is kept
+6. **Automatic Compression**: Older data can be compressed to save storage space (JSON mode)
+7. **Time Range Queries**: Retrieve historical data from specific time periods
+8. **Migration Tools**: Convert existing JSON data to SQLite
+
+## Storage Backends (New in v2.0)
+
+### SQLite Storage (Recommended)
+
+SQLite provides the best performance for most use cases:
+
+**Benefits:**
+- 10-100x faster queries compared to JSON
+- Efficient indexing on device_addr, timestamp, client_id
+- Built-in transaction support
+- Better memory efficiency
+- Support for complex filtering and aggregation
+- Write-Ahead Logging (WAL) for better concurrency
+
+**Usage:**
+```bash
+# SQLite is the default storage backend
+./govee-server -storage-type=sqlite -db-path=./data/readings.db
+```
+
+**Database Schema:**
+```sql
+CREATE TABLE readings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_addr TEXT NOT NULL,
+    device_name TEXT,
+    timestamp DATETIME NOT NULL,
+    temperature REAL,
+    humidity REAL,
+    battery INTEGER,
+    rssi INTEGER,
+    client_id TEXT,
+    dew_point REAL,
+    absolute_humidity REAL,
+    steam_pressure REAL
+);
+
+-- Optimized indexes
+CREATE INDEX idx_device_addr ON readings(device_addr);
+CREATE INDEX idx_timestamp ON readings(timestamp);
+CREATE INDEX idx_device_timestamp ON readings(device_addr, timestamp);
+CREATE INDEX idx_client_id ON readings(client_id);
+```
+
+### JSON Storage (Legacy)
+
+JSON-based storage is still supported for backwards compatibility:
+
+**Usage:**
+```bash
+./govee-server -storage-type=json -storage=./data
+```
+
+JSON storage supports time-based partitioning and compression (see sections below).
+
+### Future Migration Path
+
+The storage abstraction layer makes it easy to migrate to time-series databases:
+
+**Planned Support:**
+- **InfluxDB**: Purpose-built for time-series data
+- **TimescaleDB**: PostgreSQL extension for time-series
+- **Prometheus**: For metrics and monitoring
+
+The `StorageBackend` interface is designed to support these backends with minimal code changes.
 
 ## Storage Configuration
 
 When starting the server, you can configure data storage with these flags:
 
+### General Storage Flags
+
 | Flag | Default | Description |
 |------|---------|-------------|
+| `-storage-type` | sqlite | Storage backend: "sqlite" or "json" |
 | `-storage` | ./data | Base storage directory |
+| `-retention` | 0 (unlimited) | How long to keep data (e.g., 8760h for 1 year) |
+
+### SQLite-Specific Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-db-path` | ./data/readings.db | Path to SQLite database file |
+
+### JSON-Specific Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
 | `-time-partition` | true | Enable time-based partitioning |
 | `-partition-interval` | 720h (30 days) | Interval for new data partitions |
-| `-retention` | 0 (unlimited) | How long to keep data (e.g., 8760h for 1 year) |
 | `-max-file-readings` | 1000 | Maximum readings per storage file |
 | `-compress` | true | Compress older partitions to save space |
 
@@ -128,9 +214,87 @@ Even with retention policies, it's recommended to periodically back up your data
 2. **Directory Backups**: Back up the entire data directory including all partitions
 3. **InfluxDB Integration**: For critical long-term storage, consider the InfluxDB integration
 
-## Migrating Existing Data
+## Migrating from JSON to SQLite (New in v2.0)
 
-When upgrading to the new storage system, existing data will be automatically migrated:
+If you're upgrading from v1.x or using JSON storage, you can migrate to SQLite for better performance:
+
+### Step 1: Create Migration Script
+
+Create a file named `migrate.go`:
+
+```go
+package main
+
+import (
+    "log"
+    "path/filepath"
+
+    // Import from your server package
+    // Adjust the import path to match your setup
+)
+
+func main() {
+    jsonDir := "./data"
+    sqlitePath := "./data/readings.db"
+
+    log.Println("Starting migration from JSON to SQLite...")
+    err := MigrateJSONToSQLite(jsonDir, sqlitePath)
+    if err != nil {
+        log.Fatalf("Migration failed: %v", err)
+    }
+
+    log.Println("Verifying migration...")
+    err = VerifyMigration(jsonDir, sqlitePath)
+    if err != nil {
+        log.Fatalf("Verification failed: %v", err)
+    }
+
+    log.Println("Migration completed successfully!")
+    log.Println("You can now start the server with: ./govee-server -storage-type=sqlite")
+}
+```
+
+### Step 2: Run Migration
+
+```bash
+cd server
+go run migrate.go
+```
+
+The migration tool will:
+1. Read all JSON files from the data directory
+2. Insert readings into SQLite in batches of 1000
+3. Verify that all data was migrated correctly
+4. Report any errors or mismatches
+
+### Step 3: Switch to SQLite
+
+After successful migration, update your server startup:
+
+```bash
+# Old (JSON storage)
+./govee-server -storage=./data
+
+# New (SQLite storage)
+./govee-server -storage-type=sqlite -db-path=./data/readings.db
+```
+
+### Step 4: Backup JSON Files (Optional)
+
+Once you've verified SQLite is working correctly, you can archive the old JSON files:
+
+```bash
+mkdir -p ./data/json-backup
+mv ./data/*.json ./data/json-backup/
+# Or if using time partitions:
+mv ./data/2023-* ./data/json-backup/
+```
+
+**Note:** Keep the JSON backup until you're confident the migration was successful.
+
+## Migrating Existing Data (Time Partitions)
+
+When upgrading JSON-based storage to use time partitioning, existing data will be automatically migrated:
 
 1. The system checks for data in the old format
 2. If found, it's converted to the new partitioned format

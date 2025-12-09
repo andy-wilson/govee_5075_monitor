@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"log"
-	"path/filepath"
 	"time"
 )
 
@@ -143,8 +142,5 @@ func RunMigration(jsonDir, sqlitePath string, verify bool) error {
 	return nil
 }
 
-// Migration CLI tool can be added as a separate command
-func main() {
-	// This can be used as a standalone migration tool
-	// go run server/migrate.go -json=./data -sqlite=./data/readings.db
-}
+// To run migration as a standalone tool, create a separate package:
+// go run -tags migrate server/migrate.go -json=./data -sqlite=./data/readings.db

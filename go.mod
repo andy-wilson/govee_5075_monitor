@@ -5,6 +5,7 @@ go 1.22
 require (
 	github.com/go-ble/ble v0.0.0-20230130210458-dd4b07d15402
 	github.com/pkg/errors v0.9.1
+	golang.org/x/time v0.5.0
 )
 
 require (

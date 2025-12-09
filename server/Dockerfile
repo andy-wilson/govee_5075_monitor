@@ -1,4 +1,4 @@
-FROM golang:1.18-alpine
+FROM golang:1.21-alpine3.19 AS builder
 
 WORKDIR /app
 
@@ -6,7 +6,7 @@ WORKDIR /app
 RUN apk add --no-cache git
 
 # Copy go.mod and go.sum first to leverage Docker caching
-COPY go.mod go.sum ./
+COPY ../go.mod ../go.sum ./
 RUN go mod download
 
 # Copy the source code
@@ -19,9 +19,12 @@ RUN CGO_ENABLED=0 go build -o govee-server ./govee-server.go
 RUN mkdir -p /app/data /app/logs
 
 # Use a minimal Alpine image for the final image
-FROM alpine:3.14
+FROM alpine:3.19
 
 WORKDIR /app
+
+# Install wget for health checks
+RUN apk add --no-cache wget
 
 # Copy the binary from the builder stage
 COPY --from=0 /app/govee-server /app/
@@ -41,6 +44,10 @@ ENV CLIENT_TIMEOUT=5m
 
 # Expose the server port
 EXPOSE 8080
+
+# Add health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
 
 # Run the application
 CMD ["/app/govee-server", "-port=${PORT}", "-log=${LOG_FILE}", "-storage=${STORAGE_DIR}", "-timeout=${CLIENT_TIMEOUT}", "-static=/app/static"]

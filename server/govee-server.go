@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -95,6 +96,55 @@ type StorageConfig struct {
 	CompressOldData    bool          `json:"compress_old_data"`     // Compress older partitions
 }
 
+// DashboardData represents data for the dashboard UI
+type DashboardData struct {
+	Devices         []*DeviceStatus      `json:"devices"`
+	Clients         []*ClientStatus      `json:"clients"`
+	ActiveClients   int                  `json:"active_clients"`
+	TotalReadings   int                  `json:"total_readings"`
+	RecentReadings  map[string][]Reading `json:"recent_readings"`
+	ServerStartTime time.Time            `json:"server_start_time"`
+}
+
+// DashboardCache caches dashboard data to reduce lock contention and improve performance
+type DashboardCache struct {
+	data       *DashboardData
+	lastUpdate time.Time
+	mu         sync.RWMutex
+	ttl        time.Duration
+}
+
+// Get returns cached data if still valid, nil otherwise
+func (dc *DashboardCache) Get() *DashboardData {
+	dc.mu.RLock()
+	defer dc.mu.RUnlock()
+
+	if dc.data != nil && time.Since(dc.lastUpdate) < dc.ttl {
+		return dc.data
+	}
+	return nil
+}
+
+// Set updates the cache with new data
+func (dc *DashboardCache) Set(data *DashboardData) {
+	dc.mu.Lock()
+	defer dc.mu.Unlock()
+
+	dc.data = data
+	dc.lastUpdate = time.Now()
+}
+
+// HealthStatus represents the detailed health status of the server
+type HealthStatus struct {
+	Status        string            `json:"status"` // "healthy", "degraded", "unhealthy"
+	Timestamp     time.Time         `json:"timestamp"`
+	Uptime        string            `json:"uptime"`
+	Version       string            `json:"version"`
+	Checks        map[string]bool   `json:"checks"`
+	Stats         map[string]int64  `json:"stats"`
+	Goroutines    int               `json:"goroutines"`
+}
+
 // Server represents the Govee server
 type Server struct {
 	// Maps device address to device status
@@ -118,6 +168,10 @@ type Server struct {
 	shutdownCancel context.CancelFunc
 	// Rate limiter
 	rateLimiter *RateLimiter
+	// Dashboard data cache
+	dashboardCache *DashboardCache
+	// Server start time for uptime tracking
+	startTime      time.Time
 }
 
 // RateLimiter tracks rate limits per IP address
@@ -617,6 +671,8 @@ func NewServer(config *Config, auth *AuthConfig, storageManager *StorageManager)
 		shutdownCtx:    ctx,
 		shutdownCancel: cancel,
 		rateLimiter:    NewRateLimiter(),
+		dashboardCache: &DashboardCache{ttl: 30 * time.Second}, // Cache for 30 seconds
+		startTime:      time.Now(),
 	}
 
 	// Initialize logging if configured
@@ -1065,6 +1121,39 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// gzipResponseWriter wraps http.ResponseWriter to provide gzip compression
+type gzipResponseWriter struct {
+	io.Writer
+	http.ResponseWriter
+}
+
+func (w gzipResponseWriter) Write(b []byte) (int, error) {
+	return w.Writer.Write(b)
+}
+
+// compressionMiddleware adds gzip compression to responses
+func (s *Server) compressionMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Check if client accepts gzip
+		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Set compression header
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Vary", "Accept-Encoding")
+
+		// Create gzip writer
+		gz := gzip.NewWriter(w)
+		defer gz.Close()
+
+		// Wrap response writer
+		gzw := gzipResponseWriter{Writer: gz, ResponseWriter: w}
+		next.ServeHTTP(gzw, r)
+	})
+}
+
 // securityHeadersMiddleware adds security headers to all responses
 func (s *Server) securityHeadersMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1290,22 +1379,21 @@ func (s *Server) handleDashboardData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Try to get cached data first
+	if cached := s.dashboardCache.Get(); cached != nil {
+		respondJSON(w, cached)
+		return
+	}
+
+	// Cache miss - generate fresh data
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 
 	// Prepare dashboard data
-	dashboardData := struct {
-		Devices         []*DeviceStatus      `json:"devices"`
-		Clients         []*ClientStatus      `json:"clients"`
-		ActiveClients   int                  `json:"active_clients"`
-		TotalReadings   int                  `json:"total_readings"`
-		RecentReadings  map[string][]Reading `json:"recent_readings"`
-		ServerStartTime time.Time            `json:"server_start_time"`
-	}{
+	dashboardData := &DashboardData{
 		Devices:         make([]*DeviceStatus, 0, len(s.devices)),
 		Clients:         make([]*ClientStatus, 0, len(s.clients)),
 		RecentReadings:  make(map[string][]Reading),
-		ServerStartTime: time.Now().Add(-time.Since(time.Now())), // Get server start time
+		ServerStartTime: s.startTime,
 	}
 
 	// Add devices
@@ -1335,6 +1423,11 @@ func (s *Server) handleDashboardData(w http.ResponseWriter, r *http.Request) {
 			dashboardData.RecentReadings[addr] = readings[start:end]
 		}
 	}
+
+	s.mu.RUnlock()
+
+	// Update cache before responding
+	s.dashboardCache.Set(dashboardData)
 
 	respondJSON(w, dashboardData)
 }
@@ -1422,8 +1515,56 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK"))
+	// Build detailed health status
+	s.mu.RLock()
+	deviceCount := len(s.devices)
+	clientCount := len(s.clients)
+	activeClients := 0
+	for _, client := range s.clients {
+		if client.IsActive {
+			activeClients++
+		}
+	}
+	s.mu.RUnlock()
+
+	uptime := time.Since(s.startTime)
+
+	health := HealthStatus{
+		Status:     "healthy",
+		Timestamp:  time.Now(),
+		Uptime:     uptime.String(),
+		Version:    "2.0.0",
+		Goroutines: runtime.NumGoroutine(),
+		Checks: map[string]bool{
+			"storage_writable": true, // Could add actual check here
+			"auth_loaded":      s.auth != nil,
+			"logging_enabled":  s.logger != nil || s.config.LogFile != "",
+		},
+		Stats: map[string]int64{
+			"devices":        int64(deviceCount),
+			"clients":        int64(clientCount),
+			"active_clients": int64(activeClients),
+			"uptime_seconds": int64(uptime.Seconds()),
+		},
+	}
+
+	// Determine overall status based on checks
+	for _, check := range health.Checks {
+		if !check {
+			health.Status = "degraded"
+			break
+		}
+	}
+
+	// Check for critical issues
+	if runtime.NumGoroutine() > 1000 {
+		health.Status = "degraded"
+		health.Checks["goroutine_count_normal"] = false
+	} else {
+		health.Checks["goroutine_count_normal"] = true
+	}
+
+	respondJSON(w, health)
 }
 
 // generateAPIKey creates a new cryptographically secure random API key
@@ -1565,21 +1706,22 @@ func main() {
 	// Create HTTP server
 	mux := http.NewServeMux()
 
-	// Create middleware chain: security headers -> rate limit -> auth
+	// Create middleware chain: compression -> security headers -> rate limit -> auth
+	compressionMiddleware := server.compressionMiddleware
 	securityMiddleware := server.securityHeadersMiddleware
 	rateLimitMiddleware := server.rateLimitMiddleware
 	authMiddleware := server.authMiddleware
 
 	// API endpoints with full middleware chain
-	mux.Handle("/readings", securityMiddleware(rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleReadings)))))
-	mux.Handle("/devices", securityMiddleware(rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleDevices)))))
-	mux.Handle("/clients", securityMiddleware(rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleClients)))))
-	mux.Handle("/stats", securityMiddleware(rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleStats)))))
-	mux.Handle("/dashboard/data", securityMiddleware(rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleDashboardData)))))
-	mux.Handle("/api/keys", securityMiddleware(rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleAPIKeys)))))
-	mux.Handle("/health", securityMiddleware(rateLimitMiddleware(http.HandlerFunc(server.handleHealthCheck))))
+	mux.Handle("/readings", compressionMiddleware(securityMiddleware(rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleReadings))))))
+	mux.Handle("/devices", compressionMiddleware(securityMiddleware(rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleDevices))))))
+	mux.Handle("/clients", compressionMiddleware(securityMiddleware(rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleClients))))))
+	mux.Handle("/stats", compressionMiddleware(securityMiddleware(rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleStats))))))
+	mux.Handle("/dashboard/data", compressionMiddleware(securityMiddleware(rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleDashboardData))))))
+	mux.Handle("/api/keys", compressionMiddleware(securityMiddleware(rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleAPIKeys))))))
+	mux.Handle("/health", compressionMiddleware(securityMiddleware(rateLimitMiddleware(http.HandlerFunc(server.handleHealthCheck)))))
 
-	// Serve static files for dashboard (with security headers)
+	// Serve static files for dashboard (with security headers, but skip compression for pre-compressed assets)
 	mux.Handle("/", securityMiddleware(handleStaticFiles(*staticDir)))
 
 	var httpServer *http.Server

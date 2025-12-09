@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-ble/ble"
@@ -61,8 +62,105 @@ type Reading struct {
 	ClientID       string    `json:"client_id"`
 }
 
-// Last seen values to avoid duplicate prints
-var lastValues = make(map[string]int)
+// Scanner tracks last seen values with thread-safety
+type Scanner struct {
+	lastValues map[string]int
+	mu         sync.RWMutex
+}
+
+// NewScanner creates a new scanner
+func NewScanner() *Scanner {
+	return &Scanner{
+		lastValues: make(map[string]int),
+	}
+}
+
+// HasValueChanged checks if a value has changed for a device (thread-safe)
+func (sc *Scanner) HasValueChanged(addr string, value int) bool {
+	sc.mu.RLock()
+	lastVal, exists := sc.lastValues[addr]
+	sc.mu.RUnlock()
+
+	if !exists || lastVal != value {
+		sc.mu.Lock()
+		sc.lastValues[addr] = value
+		sc.mu.Unlock()
+		return true
+	}
+	return false
+}
+
+// SendQueue manages worker pool for sending readings to server
+type SendQueue struct {
+	queue       chan Reading
+	wg          sync.WaitGroup
+	serverURL   string
+	apiKey      string
+	insecure    bool
+	caCertFile  string
+	httpTimeout time.Duration
+}
+
+// NewSendQueue creates a new send queue with worker pool
+func NewSendQueue(workers int, serverURL, apiKey string, insecure bool, caCertFile string, httpTimeout time.Duration) *SendQueue {
+	sq := &SendQueue{
+		queue:       make(chan Reading, 100),
+		serverURL:   serverURL,
+		apiKey:      apiKey,
+		insecure:    insecure,
+		caCertFile:  caCertFile,
+		httpTimeout: httpTimeout,
+	}
+
+	// Start worker goroutines
+	for i := 0; i < workers; i++ {
+		sq.wg.Add(1)
+		go sq.worker()
+	}
+
+	return sq
+}
+
+// Enqueue adds a reading to the send queue
+func (sq *SendQueue) Enqueue(reading Reading) {
+	select {
+	case sq.queue <- reading:
+	default:
+		log.Printf("Send queue full, dropping reading for device %s", reading.DeviceAddr)
+	}
+}
+
+// Close stops the send queue
+func (sq *SendQueue) Close() {
+	close(sq.queue)
+	sq.wg.Wait()
+}
+
+// worker processes readings from the queue
+func (sq *SendQueue) worker() {
+	defer sq.wg.Done()
+
+	for reading := range sq.queue {
+		// Retry logic with exponential backoff
+		maxRetries := 3
+		backoff := time.Second
+
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			err := sendToServer(sq.serverURL, reading, sq.apiKey, sq.insecure, sq.caCertFile, sq.httpTimeout)
+			if err == nil {
+				break
+			}
+
+			if attempt < maxRetries-1 {
+				log.Printf("Failed to send reading (attempt %d/%d): %v. Retrying in %v...", attempt+1, maxRetries, err, backoff)
+				time.Sleep(backoff)
+				backoff *= 2
+			} else {
+				log.Printf("Failed to send reading after %d attempts: %v", maxRetries, err)
+			}
+		}
+	}
+}
 
 func main() {
 	// Parse command line arguments
@@ -79,13 +177,23 @@ func main() {
 	tempOffset := flag.Float64("temp-offset", 0.0, "temperature offset calibration (°C)")
 	humidityOffset := flag.Float64("humidity-offset", 0.0, "humidity offset calibration (%)")
 	// HTTPS flags
-	insecureSkipVerify := flag.Bool("insecure", false, "skip TLS certificate verification")
+	insecureSkipVerify := flag.Bool("insecure-skip-tls-verify-dangerous", false, "DANGEROUS: skip TLS certificate verification (vulnerable to MITM attacks)")
 	caCertFile := flag.String("ca-cert", "", "path to CA certificate file for TLS verification")
+	httpTimeout := flag.Duration("http-timeout", 10*time.Second, "HTTP request timeout")
 	flag.Parse()
 
 	// Check if API key is provided when not in local mode
 	if !*localOnly && !*discoveryMode && *apiKey == "" {
 		log.Println("Warning: No API key provided. Server communications may fail. Use -apikey flag to provide one or use -local=true for local mode.")
+	}
+
+	// Warn about insecure TLS
+	if *insecureSkipVerify {
+		log.Println("========================================")
+		log.Println("WARNING: TLS certificate verification is DISABLED")
+		log.Println("WARNING: This makes you vulnerable to man-in-the-middle attacks")
+		log.Println("WARNING: DO NOT USE IN PRODUCTION")
+		log.Println("========================================")
 	}
 
 	// Initialize logging if requested
@@ -117,6 +225,16 @@ func main() {
 		fmt.Println("\nReceived interrupt signal. Shutting down gracefully...")
 		cancel()
 	}()
+
+	// Create thread-safe scanner
+	scanner := NewScanner()
+
+	// Create send queue with worker pool (5 concurrent senders)
+	var sendQueue *SendQueue
+	if !*localOnly {
+		sendQueue = NewSendQueue(5, *serverURL, *apiKey, *insecureSkipVerify, *caCertFile, *httpTimeout)
+		defer sendQueue.Close()
+	}
 
 	// Map to store discovered devices
 	devices := make(map[string]*GoveeDevice)
@@ -152,7 +270,6 @@ func main() {
 			runningFor := time.Since(startTime).Round(time.Second)
 			fmt.Printf("Starting scan cycle %d (running for %s)...\n", scanCount, runningFor)
 		}
-		defer scanCancel()
 
 		if err := ble.Scan(scanCtx, true, func(a ble.Advertisement) {
 			// Get device info
@@ -196,9 +313,8 @@ func main() {
 							values = (values << 8) | uint32(mfrData[i+3])
 						}
 
-						// Only process if the value has changed
-						if lastVal, exists := lastValues[addr]; !exists || lastVal != int(values) {
-							lastValues[addr] = int(values)
+						// Only process if the value has changed (thread-safe)
+						if scanner.HasValueChanged(addr, int(values)) {
 
 							// Calculate temperature with offset
 							tempC := float64(values)/10000.0 + *tempOffset
@@ -292,9 +408,9 @@ func main() {
 								}
 							}
 
-							// Send to server if not in local mode
-							if !*localOnly {
-								go sendToServer(*serverURL, reading, *apiKey, *insecureSkipVerify, *caCertFile)
+							// Send to server if not in local mode (using worker pool)
+							if !*localOnly && sendQueue != nil {
+								sendQueue.Enqueue(reading)
 							}
 
 							// Print device information
@@ -425,12 +541,11 @@ func printDeviceText(device *GoveeDevice) {
 	)
 }
 
-func sendToServer(serverURL string, reading Reading, apiKey string, insecureSkipVerify bool, caCertFile string) {
+func sendToServer(serverURL string, reading Reading, apiKey string, insecureSkipVerify bool, caCertFile string, httpTimeout time.Duration) error {
 	// Convert reading to JSON
 	jsonData, err := json.Marshal(reading)
 	if err != nil {
-		log.Printf("Error marshaling JSON: %v", err)
-		return
+		return fmt.Errorf("error marshaling JSON: %v", err)
 	}
 
 	// Create HTTP client with TLS configuration
@@ -439,23 +554,19 @@ func sendToServer(serverURL string, reading Reading, apiKey string, insecureSkip
 	// Handle certificate verification options
 	if insecureSkipVerify {
 		tlsConfig.InsecureSkipVerify = true
-		log.Printf("Warning: TLS certificate verification disabled")
 	} else if caCertFile != "" {
 		// Load CA cert if specified
 		caCert, err := os.ReadFile(caCertFile)
 		if err != nil {
-			log.Printf("Error loading CA certificate: %v", err)
-			return
+			return fmt.Errorf("error loading CA certificate: %v", err)
 		}
 
 		caCertPool := x509.NewCertPool()
 		if ok := caCertPool.AppendCertsFromPEM(caCert); !ok {
-			log.Printf("Failed to append CA certificate")
-			return
+			return fmt.Errorf("failed to append CA certificate")
 		}
 
 		tlsConfig.RootCAs = caCertPool
-		log.Printf("Using custom CA certificate for TLS verification")
 	}
 
 	// Create transport and client
@@ -464,38 +575,36 @@ func sendToServer(serverURL string, reading Reading, apiKey string, insecureSkip
 	}
 
 	client := &http.Client{
-		Timeout:   5 * time.Second,
+		Timeout:   httpTimeout,
 		Transport: transport,
 	}
 
 	// Create HTTP request
 	req, err := http.NewRequest("POST", serverURL, bytes.NewBuffer(jsonData))
 	if err != nil {
-		log.Printf("Error creating HTTP request: %v", err)
-		return
+		return fmt.Errorf("error creating HTTP request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	// Add API key for authentication - THIS MUST BE INCLUDED
+	// Add API key for authentication
 	if apiKey != "" {
 		req.Header.Set("X-API-Key", apiKey)
-	} else {
-		log.Printf("Warning: No API key provided for authentication")
 	}
 
 	// Send the request
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("Error sending data to server: %v", err)
-		return
+		return fmt.Errorf("error sending data to server: %v", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		log.Printf("Authentication failed: Invalid API key")
+		return fmt.Errorf("authentication failed: Invalid API key")
 	} else if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		log.Printf("Server responded with status %d", resp.StatusCode)
+		return fmt.Errorf("server responded with status %d", resp.StatusCode)
 	}
+
+	return nil
 }
 
 // getDefaultClientID generates a default client ID based on hostname

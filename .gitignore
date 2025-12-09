@@ -27,3 +27,4 @@ go.work.sum
 # shakes fist at macOS
 .DS_Store
 
+*.swp

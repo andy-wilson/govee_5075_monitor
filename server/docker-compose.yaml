@@ -24,6 +24,14 @@ services:
       - ADMIN_KEY=${ADMIN_KEY:-admin-key-here}
       - ALLOW_DEFAULT=false
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
     command: >
       /app/govee-server 
       -port=${PORT} 
@@ -46,11 +54,11 @@ services:
       - influxdb-data:/var/lib/influxdb2
     environment:
       - DOCKER_INFLUXDB_INIT_MODE=setup
-      - DOCKER_INFLUXDB_INIT_USERNAME=admin
-      - DOCKER_INFLUXDB_INIT_PASSWORD=goveepassword
+      - DOCKER_INFLUXDB_INIT_USERNAME=${INFLUXDB_ADMIN_USER:-admin}
+      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUXDB_ADMIN_PASSWORD}  # REQUIRED: Set in .env file
       - DOCKER_INFLUXDB_INIT_ORG=govee
       - DOCKER_INFLUXDB_INIT_BUCKET=govee_metrics
-      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=myauthtoken
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUXDB_ADMIN_TOKEN}  # REQUIRED: Set in .env file
     restart: unless-stopped
 
   # Optional Grafana service for additional visualization
@@ -61,8 +69,8 @@ services:
     volumes:
       - grafana-data:/var/lib/grafana
     environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=goveepassword
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}  # REQUIRED: Set in .env file
     depends_on:
       - influxdb
     restart: unless-stopped

@@ -4,7 +4,7 @@ info:
   description: |
     API for Govee H5075 Temperature and Humidity Monitoring System.
     This API allows clients to submit sensor readings and retrieve data from the monitoring system.
-  version: 1.0.0
+  version: 2.0.0
   contact:
     name: System Administrator
     
@@ -310,16 +310,22 @@ paths:
   /health:
     get:
       summary: Health check endpoint
-      description: Check if the server is running
+      description: Check if the server is running and get detailed health status
       security: []  # No authentication required
       responses:
         '200':
-          description: Server is healthy
+          description: Server health status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+        '405':
+          description: Method not allowed (only GET is supported)
           content:
             text/plain:
               schema:
                 type: string
-                example: "OK"
+                example: "Method not allowed"
         
 
 components:
@@ -653,6 +659,51 @@ components:
           description: Time when the server was started
           example: "2023-04-10T00:00:00Z"
     
+    HealthStatus:
+      type: object
+      description: Server health status with detailed system information
+      properties:
+        status:
+          type: string
+          description: Overall health status
+          enum: [healthy, degraded, unhealthy]
+          example: "healthy"
+        timestamp:
+          type: string
+          format: date-time
+          description: Time of the health check
+          example: "2023-04-13T15:30:45Z"
+        uptime:
+          type: string
+          description: Server uptime in human-readable format
+          example: "72h30m15s"
+        version:
+          type: string
+          description: Server version
+          example: "2.0.0"
+        goroutines:
+          type: integer
+          description: Number of running goroutines
+          example: 12
+        checks:
+          type: object
+          description: Individual health check results
+          additionalProperties:
+            type: boolean
+          example:
+            storage_writable: true
+            auth_loaded: true
+            logging_enabled: true
+        stats:
+          type: object
+          description: System statistics
+          additionalProperties:
+            type: integer
+          example:
+            devices: 3
+            clients: 2
+            active_clients: 1
+
     Error:
       type: object
       properties:

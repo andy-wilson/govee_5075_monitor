@@ -344,10 +344,12 @@ curl http://localhost:8080/health       # Check health
 docker-compose down                     # Stop server
 
 # Client
-./govee-client -discover                # Find sensors
-./govee-client -local=true              # Test locally
-./govee-client -server=... -apikey=...  # Connect to server
-docker-compose up -d                    # Run in Docker
+./govee-client -discover                    # Find sensors
+./govee-client -local                       # Test locally (all readings)
+./govee-client -local -single               # One reading per device
+./govee-client -local -device=GVH5075_8F19  # Filter by device
+./govee-client -server=... -apikey=...      # Connect to server
+docker-compose up -d                        # Run in Docker
 
 # Testing
 go test -v ./server/...                 # Run tests

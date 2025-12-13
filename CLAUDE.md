@@ -33,6 +33,12 @@ cd client && ./govee-client -discover -duration=1m
 # Run client in standalone mode (no server needed)
 cd client && ./govee-client -local=true
 
+# Run client with single reading per device
+cd client && ./govee-client -local -single
+
+# Run client filtering by specific device
+cd client && ./govee-client -local -device=GVH5075_8F19
+
 # Run client connected to server
 cd client && ./govee-client -server=http://localhost:8080/readings -apikey=YOUR_KEY -continuous=true
 ```
@@ -49,7 +55,19 @@ docker-compose -f client/docker-compose.yaml up -d
 
 ### Testing
 
-There are no automated tests in the repository yet. Testing is manual via running the client/server.
+```bash
+# Run all tests
+make test
+
+# Run tests with race detection
+make test-race
+
+# Generate coverage report
+make coverage-html
+
+# Run benchmarks
+make benchmark
+```
 
 ## Architecture
 

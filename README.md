@@ -189,6 +189,8 @@ The client accepts the following command-line arguments:
 | `-log` | "" | File to log data to (empty for no logging) |
 | `-local` | false | Local mode (don't send to server) |
 | `-discover` | false | Discovery mode - scan and list devices only |
+| `-single` | false | Display only one reading per device during scan |
+| `-device` | "" | Filter readings by device name (e.g., "GVH5075_8F19") |
 
 ### Server Configuration
 

@@ -8,6 +8,10 @@
 *.so
 *.dylib
 
+# Built binaries
+client/govee-client
+server/govee-server
+
 # Test binary, built with `go test -c`
 *.test
 

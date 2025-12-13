@@ -415,7 +415,7 @@ For more advanced data analysis and visualization, the system includes optional 
 - **[docs/metrics-guide.md](docs/metrics-guide.md)** - Enhanced environmental metrics
 
 ### API Reference
-- **[openapi.yaml](openapi.yaml)** - OpenAPI v3 specification for REST API
+- **[openapi/openapi.yaml](openapi.yaml)** - OpenAPI v3 specification for REST API
 
 ### Development
 - **[TODO.md](TODO.md)** - Feature roadmap and known issues

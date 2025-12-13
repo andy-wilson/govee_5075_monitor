@@ -175,6 +175,7 @@ func main() {
 	localOnly := flag.Bool("local", false, "local mode (don't send to server)")
 	discoveryMode := flag.Bool("discover", false, "discovery mode - only scan for devices and print a list")
 	singleReading := flag.Bool("single", false, "display only a single reading per device during scan")
+	deviceFilter := flag.String("device", "", "filter readings by device name (e.g., GVH5075_8F19)")
 	tempOffset := flag.Float64("temp-offset", 0.0, "temperature offset calibration (°C)")
 	humidityOffset := flag.Float64("humidity-offset", 0.0, "humidity offset calibration (%)")
 	// HTTPS flags
@@ -283,6 +284,11 @@ func main() {
 
 			// Check if this might be a Govee device by name
 			isGoveeDevice := strings.HasPrefix(name, "GVH5075")
+
+			// Apply device filter if specified
+			if *deviceFilter != "" && name != *deviceFilter {
+				return
+			}
 
 			// Get the manufacturer data
 			mfrData := a.ManufacturerData()

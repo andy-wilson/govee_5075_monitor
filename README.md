@@ -1,33 +1,31 @@
 # Govee 5075 Monitoring System
 
-**Version 2.0** - Production-Ready Temperature & Humidity Monitoring
+A reasonably secure client-server system for monitoring Govee H5075 temperature and humidity sensors via Bluetooth Low Energy (BLE). This project includes a client for collecting sensor data, a server for aggregating and storing measurements, and a React-based dashboard for visualization.
 
-A high-performance, secure client-server system for monitoring Govee H5075 temperature and humidity sensors via Bluetooth Low Energy (BLE). This project includes a client for collecting sensor data, a server for aggregating and storing measurements, and a React-based dashboard for visualization.
+The feature set may seem a little random, and a bit extensive/specific in some areas, but I've been developing this while trying to solve some specific problems with sensors at home, and well.. things got a bit out of hand.
+Needless to say, this might be utterly broken for you, that old addage "works on my machine" seems appropriate. This comes with
+absolutely no warranty whatsover (as per the [license](LICENSE.md)).
+
+I'm not intending to do much with this other than nerd out and use it at home, but if someone finds any of this useful for home
+use then great. I have a few [TODOs](TODO.md) still, but if anyone finds this and wants/needs a feature, feel free to be harsh w
+ith the code critique, and also to submit PRs.
+
+I might add support for some other models and modes of operation in time.
 
 ## 🚀 What's New in v2.0
 
-- **10-100x Faster Queries** - SQLite storage backend with indexed queries
-- **80% Bandwidth Reduction** - HTTP compression (gzip)
-- **Enhanced Security** - XSS prevention, comprehensive security headers, input validation
-- **Dashboard Caching** - 50% faster dashboard loads with 30-second cache
-- **Comprehensive Testing** - 105 unit tests, 100% pass rate, benchmarks
+- **10-100x Faster Queries** - SQLite storage backend for the server (optional), with indexed queries. Replaces munging potentially thousands of JSON files
+- **Enhanced Security** - XSS fixes, security headers, proper input validation
+- **Dashboard** - Faster dashboard loads with configurable cache
+- **Improved Testing** - 105 unit tests, benchmarks
 - **CI/CD Pipeline** - Automated testing, linting, security scanning
 - **Better Monitoring** - Enhanced health checks with detailed system stats
-- **Production Ready** - All security vulnerabilities fixed, robust error handling
 
 ## 📖 Quick Start
 
 **New to this project?** See [QUICKSTART.md](QUICKSTART.md) for a 5-minute setup guide.
 
 ---
-
-The feature set may seem a little random, and a bit extensive/specific in some specific areas, but I've been developing this while trying to solve some specific problems with sensors at home, and well.. things got a bit out of hand.
-Needless to say, this might be utterly broken for you, that old addage "works on my machine" seems appropriate. This comes with absolutely no warranty whatsover (as per the [license](LICENSE.md)).
-
-I'm not intending to do much with this other than nerd out and use it at home, but if someone finds any of this useful for home use then great. I have a few [TODOs](TODO.md) still, but if anyone finds this and wants/needs a feature, feel free to be harsh with the code critique, and also to submit PRs.
-
-I might add support for some other models and modes of operation in time. 
-
 
 ## System Architecture
 
@@ -415,10 +413,9 @@ For more advanced data analysis and visualization, the system includes optional 
 - **[docs/metrics-guide.md](docs/metrics-guide.md)** - Enhanced environmental metrics
 
 ### API Reference
-- **[openapi/openapi.yaml](openapi.yaml)** - OpenAPI v3 specification for REST API
+- **[openapi/openapi.yaml](openapi/openapi.yaml)** - OpenAPI v3 specification for REST API
 
 ### Development
-- **[TODO.md](TODO.md)** - Feature roadmap and known issues
 - **[AUTHORS.md](AUTHORS.md)** - Contributors
 
 ---
@@ -441,27 +438,6 @@ go tool cover -html=coverage.out
 # Run benchmarks
 go test -bench=. ./server/...
 ```
-
-**Test Results:**
-- 105 unit tests (79 server, 26 client)
-- 100% pass rate
-- Security vulnerability testing (XSS, path traversal, SQL injection)
-- Performance benchmarks
-
----
-
-## CI/CD Pipeline
-
-Automated quality checks run on every commit:
-
-- ✅ Unit tests with race detection
-- ✅ golangci-lint code quality checks
-- ✅ Gosec security scanning
-- ✅ Trivy vulnerability scanning
-- ✅ Docker image builds
-- ✅ Code coverage reports
-
-See [.github/workflows/ci.yml](.github/workflows/ci.yml) for details.
 
 ---
 

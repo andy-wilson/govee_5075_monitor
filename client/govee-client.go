@@ -174,6 +174,7 @@ func main() {
 	logFile := flag.String("log", "", "file to log data to (empty for no logging)")
 	localOnly := flag.Bool("local", false, "local mode (don't send to server)")
 	discoveryMode := flag.Bool("discover", false, "discovery mode - only scan for devices and print a list")
+	singleReading := flag.Bool("single", false, "display only a single reading per device during scan")
 	tempOffset := flag.Float64("temp-offset", 0.0, "temperature offset calibration (°C)")
 	humidityOffset := flag.Float64("humidity-offset", 0.0, "humidity offset calibration (%)")
 	// HTTPS flags
@@ -238,6 +239,9 @@ func main() {
 
 	// Map to store discovered devices
 	devices := make(map[string]*GoveeDevice)
+
+	// Track devices already printed (for -single mode)
+	printedDevices := make(map[string]bool)
 
 	// Calculate end time if runtime is specified
 	var endTime time.Time
@@ -413,8 +417,11 @@ func main() {
 								sendQueue.Enqueue(reading)
 							}
 
-							// Print device information
-							printDeviceText(devices[addr])
+							// Print device information (skip if -single and already printed)
+							if !*singleReading || !printedDevices[addr] {
+								printDeviceText(devices[addr])
+								printedDevices[addr] = true
+							}
 						}
 					}
 				}
@@ -460,8 +467,27 @@ func main() {
 	}
 
 	if !*discoveryMode {
-		fmt.Printf("Scan completed after %s. Discovered %d devices.\n",
+		fmt.Printf("\nScan completed after %s. Discovered %d devices.\n",
 			time.Since(startTime).Round(time.Second), len(devices))
+
+		// Print summary table in single mode
+		if *singleReading && len(devices) > 0 {
+			fmt.Println("\n=== Device Summary ===")
+			fmt.Printf("%-14s %7s %7s %6s %6s %4s %6s\n",
+				"Device", "Temp°C", "Temp°F", "RH%", "DewPt", "Bat", "RSSI")
+			fmt.Printf("%-14s %7s %7s %6s %6s %4s %6s\n",
+				"--------------", "-------", "-------", "------", "------", "----", "------")
+			for _, device := range devices {
+				fmt.Printf("%-14s %7.1f %7.1f %6.1f %6.1f %3d%% %4ddBm\n",
+					device.Name,
+					device.TempC,
+					device.TempF,
+					device.Humidity,
+					device.DewPointC,
+					device.Battery,
+					device.RSSI)
+			}
+		}
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -310,10 +311,9 @@ func (s *SQLiteStorage) DeleteOldReadings(cutoffTime time.Time) error {
 	affected, _ := result.RowsAffected()
 	if affected > 0 {
 		// Also delete old aggregates
-		s.db.Exec("DELETE FROM hourly_aggregates WHERE hour_timestamp < ?", cutoffTime)
-
-		// Vacuum to reclaim space (do this periodically, not every time)
-		go s.db.Exec("VACUUM")
+		if _, err := s.db.Exec("DELETE FROM hourly_aggregates WHERE hour_timestamp < ?", cutoffTime); err != nil {
+			log.Printf("Warning: failed to delete old aggregates: %v", err)
+		}
 	}
 
 	return nil

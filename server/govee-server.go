@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -174,16 +175,46 @@ type Server struct {
 	startTime      time.Time
 }
 
-// RateLimiter tracks rate limits per IP address
+// rateLimiterEntry tracks a rate limiter with its last access time
+type rateLimiterEntry struct {
+	limiter    *rate.Limiter
+	lastAccess time.Time
+}
+
+// RateLimiter tracks rate limits per IP address with automatic cleanup
 type RateLimiter struct {
-	limiters map[string]*rate.Limiter
+	limiters map[string]*rateLimiterEntry
 	mu       sync.Mutex
 }
 
-// NewRateLimiter creates a new rate limiter
+// NewRateLimiter creates a new rate limiter with periodic cleanup
 func NewRateLimiter() *RateLimiter {
-	return &RateLimiter{
-		limiters: make(map[string]*rate.Limiter),
+	rl := &RateLimiter{
+		limiters: make(map[string]*rateLimiterEntry),
+	}
+
+	// Periodically clean up stale entries to prevent memory leaks
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			rl.cleanup(30 * time.Minute)
+		}
+	}()
+
+	return rl
+}
+
+// cleanup removes rate limiter entries that haven't been accessed recently
+func (rl *RateLimiter) cleanup(maxAge time.Duration) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	for ip, entry := range rl.limiters {
+		if now.Sub(entry.lastAccess) > maxAge {
+			delete(rl.limiters, ip)
+		}
 	}
 }
 
@@ -192,13 +223,18 @@ func (rl *RateLimiter) GetLimiter(ip string) *rate.Limiter {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
-	limiter, exists := rl.limiters[ip]
+	entry, exists := rl.limiters[ip]
 	if !exists {
-		limiter = rate.NewLimiter(10, 20) // 10 req/sec, burst 20
-		rl.limiters[ip] = limiter
+		entry = &rateLimiterEntry{
+			limiter:    rate.NewLimiter(10, 20), // 10 req/sec, burst 20
+			lastAccess: time.Now(),
+		}
+		rl.limiters[ip] = entry
+	} else {
+		entry.lastAccess = time.Now()
 	}
 
-	return limiter
+	return entry.limiter
 }
 
 // Config represents server configuration
@@ -213,6 +249,7 @@ type Config struct {
 	EnableHTTPS        bool          `json:"enable_https"`
 	CertFile           string        `json:"cert_file"`
 	KeyFile            string        `json:"key_file"`
+	TrustedProxies     []*net.IPNet  // CIDR ranges of trusted reverse proxies
 }
 
 // StorageManager handles reading/writing data with partitioning and retention policies
@@ -238,11 +275,17 @@ func NewStorageManager(config *StorageConfig) *StorageManager {
 	}
 }
 
+// Pre-compiled regex patterns for validation (compiled once for efficiency)
+var (
+	deviceAddrRegex = regexp.MustCompile(`^[0-9A-Fa-f:]{12,17}$`)
+	deviceNameRegex = regexp.MustCompile(`^[a-zA-Z0-9 _\-\.()]+$`)
+	clientIDRegex   = regexp.MustCompile(`^[a-zA-Z0-9_\-\.]+$`)
+)
+
 // sanitizeDeviceAddr validates and sanitizes device MAC addresses to prevent path traversal
 func sanitizeDeviceAddr(addr string) (string, error) {
 	// MAC address format: XX:XX:XX:XX:XX:XX or XXXXXXXXXXXX
-	matched, _ := regexp.MatchString(`^[0-9A-Fa-f:]{12,17}$`, addr)
-	if !matched {
+	if !deviceAddrRegex.MatchString(addr) {
 		return "", fmt.Errorf("invalid device address format")
 	}
 	// Remove colons and convert to lowercase for consistent filenames
@@ -254,8 +297,7 @@ func sanitizeDeviceAddr(addr string) (string, error) {
 func sanitizeDeviceName(name string) (string, error) {
 	// Device name should only contain alphanumeric, spaces, hyphens, underscores, and basic punctuation
 	// This prevents XSS attacks through device names
-	matched, _ := regexp.MatchString(`^[a-zA-Z0-9 _\-\.()]+$`, name)
-	if !matched {
+	if !deviceNameRegex.MatchString(name) {
 		return "", fmt.Errorf("device name contains invalid characters")
 	}
 	if len(name) == 0 {
@@ -265,6 +307,20 @@ func sanitizeDeviceName(name string) (string, error) {
 		return "", fmt.Errorf("device name too long (max 100 characters)")
 	}
 	return strings.TrimSpace(name), nil
+}
+
+// sanitizeClientID validates client IDs to prevent injection via map keys or persisted JSON
+func sanitizeClientID(id string) (string, error) {
+	if len(id) == 0 {
+		return "", fmt.Errorf("client ID required")
+	}
+	if len(id) > 100 {
+		return "", fmt.Errorf("client ID too long (max 100 characters)")
+	}
+	if !clientIDRegex.MatchString(id) {
+		return "", fmt.Errorf("client ID contains invalid characters")
+	}
+	return id, nil
 }
 
 // validateReading validates sensor reading values
@@ -288,12 +344,11 @@ func validateReading(r *Reading) error {
 	if len(r.DeviceAddr) == 0 {
 		return fmt.Errorf("device address required")
 	}
-	if len(r.ClientID) == 0 {
-		return fmt.Errorf("client ID required")
+	sanitizedClientID, err := sanitizeClientID(r.ClientID)
+	if err != nil {
+		return fmt.Errorf("invalid client ID: %v", err)
 	}
-	if len(r.ClientID) > 100 {
-		return fmt.Errorf("client ID too long")
-	}
+	r.ClientID = sanitizedClientID
 	// Timestamp should be recent (within 24 hours)
 	now := time.Now()
 	if r.Timestamp.After(now.Add(time.Hour)) {
@@ -721,22 +776,34 @@ func (s *Server) startPersistence(ctx context.Context) {
 
 // saveData saves current server state to disk (optimized to minimize lock time)
 func (s *Server) saveData() {
-	// Take snapshot under read lock (fast)
+	// Take deep snapshot under read lock to prevent data races during I/O
 	s.mu.RLock()
 	devicesCopy := make(map[string]*DeviceStatus, len(s.devices))
 	for k, v := range s.devices {
-		devicesCopy[k] = v
+		copied := *v
+		devicesCopy[k] = &copied
 	}
 	clientsCopy := make(map[string]*ClientStatus, len(s.clients))
 	for k, v := range s.clients {
-		clientsCopy[k] = v
+		copied := *v
+		clientsCopy[k] = &copied
 	}
 	readingsCopy := make(map[string][]Reading, len(s.readings))
 	for k, v := range s.readings {
-		readingsCopy[k] = v
+		sliceCopy := make([]Reading, len(v))
+		copy(sliceCopy, v)
+		readingsCopy[k] = sliceCopy
 	}
-	authCopy := s.auth
 	enableAuth := s.auth.EnableAuth
+	var authCopy *AuthConfig
+	if s.auth != nil {
+		ac := *s.auth
+		ac.APIKeys = make(map[string]string, len(s.auth.APIKeys))
+		for k, v := range s.auth.APIKeys {
+			ac.APIKeys[k] = v
+		}
+		authCopy = &ac
+	}
 	s.mu.RUnlock()
 
 	// Now perform all I/O operations without holding the lock
@@ -767,7 +834,7 @@ func (s *Server) saveData() {
 		if err != nil {
 			log.Printf("Failed to marshal auth data: %v", err)
 		} else {
-			if err := os.WriteFile(fmt.Sprintf("%s/auth.json", s.config.StorageDir), authData, 0644); err != nil {
+			if err := os.WriteFile(fmt.Sprintf("%s/auth.json", s.config.StorageDir), authData, 0600); err != nil {
 				log.Printf("Failed to save auth data: %v", err)
 			}
 		}
@@ -1095,6 +1162,31 @@ func (s *Server) getDeviceStats(deviceAddr string) map[string]interface{} {
 	return stats
 }
 
+// getClientIP extracts the real client IP, only trusting X-Forwarded-For
+// from configured trusted proxy addresses to prevent IP spoofing.
+func (s *Server) getClientIP(r *http.Request) string {
+	// Strip port from RemoteAddr
+	remoteIP, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		remoteIP = r.RemoteAddr
+	}
+
+	// Only trust X-Forwarded-For if the direct connection is from a trusted proxy
+	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" && len(s.config.TrustedProxies) > 0 {
+		ip := net.ParseIP(remoteIP)
+		if ip != nil {
+			for _, cidr := range s.config.TrustedProxies {
+				if cidr.Contains(ip) {
+					// Trusted proxy: use the first (leftmost) client IP
+					return strings.TrimSpace(strings.Split(forwarded, ",")[0])
+				}
+			}
+		}
+	}
+
+	return remoteIP
+}
+
 // rateLimitMiddleware enforces rate limiting per IP address
 func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1104,11 +1196,7 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Get IP address (handle X-Forwarded-For for proxies)
-		ip := r.RemoteAddr
-		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-			ip = strings.Split(forwarded, ",")[0]
-		}
+		ip := s.getClientIP(r)
 
 		limiter := s.rateLimiter.GetLimiter(ip)
 		if !limiter.Allow() {
@@ -1121,17 +1209,41 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// gzipResponseWriter wraps http.ResponseWriter to provide gzip compression
+// gzipResponseWriter wraps http.ResponseWriter to defer gzip headers until
+// the first Write, so error responses are not incorrectly marked as gzip.
 type gzipResponseWriter struct {
-	io.Writer
 	http.ResponseWriter
+	gz          *gzip.Writer
+	wroteHeader bool
 }
 
-func (w gzipResponseWriter) Write(b []byte) (int, error) {
-	return w.Writer.Write(b)
+func (w *gzipResponseWriter) WriteHeader(code int) {
+	if code >= 400 {
+		// Error responses: don't compress, let the plain writer handle it
+		w.wroteHeader = true
+		w.ResponseWriter.WriteHeader(code)
+		return
+	}
+	w.ResponseWriter.Header().Set("Content-Encoding", "gzip")
+	w.ResponseWriter.Header().Set("Vary", "Accept-Encoding")
+	w.ResponseWriter.Header().Del("Content-Length") // Length changes with compression
+	w.wroteHeader = true
+	w.ResponseWriter.WriteHeader(code)
 }
 
-// compressionMiddleware adds gzip compression to responses
+func (w *gzipResponseWriter) Write(b []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	// If Content-Encoding was set, write through gzip; otherwise write directly
+	if w.ResponseWriter.Header().Get("Content-Encoding") == "gzip" {
+		return w.gz.Write(b)
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+// compressionMiddleware adds gzip compression to responses, deferring the
+// Content-Encoding header until the response status is known.
 func (s *Server) compressionMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Check if client accepts gzip
@@ -1140,16 +1252,10 @@ func (s *Server) compressionMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Set compression header
-		w.Header().Set("Content-Encoding", "gzip")
-		w.Header().Set("Vary", "Accept-Encoding")
-
-		// Create gzip writer
 		gz := gzip.NewWriter(w)
 		defer gz.Close()
 
-		// Wrap response writer
-		gzw := gzipResponseWriter{Writer: gz, ResponseWriter: w}
+		gzw := &gzipResponseWriter{ResponseWriter: w, gz: gz}
 		next.ServeHTTP(gzw, r)
 	})
 }
@@ -1201,10 +1307,12 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Skip authentication for GET requests to public endpoints
+		// Dashboard data is read-only sensor data and served alongside the public dashboard page
 		if r.Method == "GET" && (r.URL.Path == "/" || strings.HasPrefix(r.URL.Path, "/js/") ||
 			strings.HasPrefix(r.URL.Path, "/css/") ||
 			strings.HasPrefix(r.URL.Path, "/img/") ||
-			r.URL.Path == "/health") {
+			r.URL.Path == "/health" ||
+			r.URL.Path == "/dashboard/data") {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -1240,8 +1348,8 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 		// For POST to /readings, validate client ID and preserve request body
 		if r.Method == "POST" && r.URL.Path == "/readings" {
-			// Read body once
-			bodyBytes, err := io.ReadAll(r.Body)
+			// Read body once (limited to 1MB)
+			bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 			r.Body.Close()
 			if err != nil {
 				http.Error(w, "Failed to read request body", http.StatusBadRequest)
@@ -1278,6 +1386,9 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 func (s *Server) handleReadings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "POST":
+		// Limit request body size to 1MB to prevent DoS
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
 		// Add a new reading
 		var reading Reading
 		if err := json.NewDecoder(r.Body).Decode(&reading); err != nil {
@@ -1454,10 +1565,12 @@ func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if keyData.ClientID == "" {
-			http.Error(w, "Client ID is required", http.StatusBadRequest)
+		sanitizedID, err := sanitizeClientID(keyData.ClientID)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Invalid client ID: %v", err), http.StatusBadRequest)
 			return
 		}
+		keyData.ClientID = sanitizedID
 
 		// Generate a new API key
 		newKey := generateAPIKey()
@@ -1619,7 +1732,29 @@ func main() {
 	maxReadingsPerFile := flag.Int("max-file-readings", 1000, "maximum readings per file")
 	compressOldData := flag.Bool("compress", true, "compress older partitions to save space")
 
+	// Proxy flags
+	trustedProxies := flag.String("trusted-proxies", "", "comma-separated CIDR ranges of trusted reverse proxies (e.g., 10.0.0.0/8,172.16.0.0/12)")
+
 	flag.Parse()
+
+	// Parse trusted proxy CIDRs
+	var parsedProxies []*net.IPNet
+	if *trustedProxies != "" {
+		for _, cidr := range strings.Split(*trustedProxies, ",") {
+			cidr = strings.TrimSpace(cidr)
+			if cidr == "" {
+				continue
+			}
+			_, network, err := net.ParseCIDR(cidr)
+			if err != nil {
+				log.Fatalf("Invalid trusted proxy CIDR %q: %v", cidr, err)
+			}
+			parsedProxies = append(parsedProxies, network)
+		}
+		if len(parsedProxies) > 0 {
+			log.Printf("Trusted proxies configured: %s", *trustedProxies)
+		}
+	}
 
 	// Create authentication configuration
 	auth := &AuthConfig{
@@ -1662,6 +1797,7 @@ func main() {
 		EnableHTTPS:        *enableHTTPS,
 		CertFile:           *certFile,
 		KeyFile:            *keyFile,
+		TrustedProxies:     parsedProxies,
 	}
 
 	// Create storage configuration
@@ -1741,10 +1877,12 @@ func main() {
 
 		// Create HTTPS server
 		httpServer = &http.Server{
-			Addr:         fmt.Sprintf(":%d", config.Port),
-			Handler:      mux,
-			ReadTimeout:  10 * time.Second,
-			WriteTimeout: 10 * time.Second,
+			Addr:           fmt.Sprintf(":%d", config.Port),
+			Handler:        mux,
+			ReadTimeout:    10 * time.Second,
+			WriteTimeout:   10 * time.Second,
+			IdleTimeout:    120 * time.Second,
+			MaxHeaderBytes: 1 << 20, // 1MB
 			TLSConfig: &tls.Config{
 				MinVersion: tls.VersionTLS12,
 			},
@@ -1763,10 +1901,12 @@ func main() {
 	} else {
 		// Create HTTP server
 		httpServer = &http.Server{
-			Addr:         fmt.Sprintf(":%d", config.Port),
-			Handler:      mux,
-			ReadTimeout:  10 * time.Second,
-			WriteTimeout: 10 * time.Second,
+			Addr:           fmt.Sprintf(":%d", config.Port),
+			Handler:        mux,
+			ReadTimeout:    10 * time.Second,
+			WriteTimeout:   10 * time.Second,
+			IdleTimeout:    120 * time.Second,
+			MaxHeaderBytes: 1 << 20, // 1MB
 		}
 
 		// Start server in a goroutine

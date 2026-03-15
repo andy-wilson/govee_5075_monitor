@@ -4,15 +4,19 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Govee Monitoring System</title>
-    <!-- Tailwind CSS -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <!-- React and ReactDOM -->
-    <script crossorigin src="https://unpkg.com/react@17/umd/react.production.min.js"></script>
-    <script crossorigin src="https://unpkg.com/react-dom@17/umd/react-dom.production.min.js"></script>
-    <!-- Babel for JSX -->
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-    <!-- Recharts for charts -->
-    <script src="https://unpkg.com/recharts/umd/Recharts.min.js"></script>
+    <!-- Tailwind CSS (dynamic script, SRI not applicable) -->
+    <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+    <!-- React and ReactDOM (pinned versions with SRI) -->
+    <script crossorigin="anonymous" src="https://unpkg.com/react@17/umd/react.production.min.js"
+            integrity="sha384-7Er69WnAl0+tY5MWEvnQzWHeDFjgHSnlQfDDeWUvv8qlRXtzaF/pNo18Q2aoZNiO"></script>
+    <script crossorigin="anonymous" src="https://unpkg.com/react-dom@17/umd/react-dom.production.min.js"
+            integrity="sha384-vj2XpC1SOa8PHrb0YlBqKN7CQzJYO72jz4CkDQ+ePL1pwOV4+dn05rPrbLGUuvCv"></script>
+    <!-- Babel for JSX (pinned version with SRI) -->
+    <script crossorigin="anonymous" src="https://unpkg.com/@babel/standalone@7.29.1/babel.min.js"
+            integrity="sha384-Fo0OdKhdnE7y2WmzjOMW4PYjHkkANeu1501pWTqKrzAPeJMFQb4ZTdAA9dtrVUJV"></script>
+    <!-- Recharts for charts (pinned version with SRI) -->
+    <script crossorigin="anonymous" src="https://unpkg.com/recharts@3.8.0/umd/Recharts.min.js"
+            integrity="sha384-8TG0lgX4oJOZCN5X4dniKfaTCevqucF/DHhcXoL6iQG4qN/H6InMFVEP2HBJwA6C"></script>
     <style>
         body {
             background-color: #f3f4f6;

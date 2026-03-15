@@ -1,6 +1,6 @@
 # Client Dockerfile for Govee BLE scanner
 
-FROM golang:1.21-alpine3.19 AS builder
+FROM golang:1.22-alpine AS builder
 
 WORKDIR /app
 
@@ -14,11 +14,11 @@ RUN go mod download
 # Copy the source code
 COPY . .
 
-# Build the application (FIXED: correct filename)
+# Build the application
 RUN go build -o govee-client ./govee-client.go
 
 # Use a minimal Alpine image for the final image
-FROM alpine:3.19
+FROM alpine:3.20
 
 WORKDIR /app
 
@@ -48,5 +48,14 @@ ENV CA_CERT=""
 HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
   CMD ps aux | grep -v grep | grep govee-client || exit 1
 
-# Run the application
-CMD ["/bin/sh", "-c", "/app/govee-client -server=${SERVER_URL} -id=${CLIENT_ID} -apikey=${APIKEY} -duration=${SCAN_DURATION} -continuous=${CONTINUOUS} -log=${LOG_FILE} -temp-offset=${TEMP_OFFSET} -humidity-offset=${HUMIDITY_OFFSET} -http-timeout=${HTTP_TIMEOUT} -insecure-skip-tls-verify-dangerous=${INSECURE} -ca-cert=${CA_CERT}"]
+# Use shell form so environment variables are expanded at runtime
+CMD /app/govee-client \
+    -server=${SERVER_URL} \
+    -id=${CLIENT_ID} \
+    -apikey=${APIKEY} \
+    -duration=${SCAN_DURATION} \
+    -continuous=${CONTINUOUS} \
+    -log=${LOG_FILE} \
+    -temp-offset=${TEMP_OFFSET} \
+    -humidity-offset=${HUMIDITY_OFFSET} \
+    -http-timeout=${HTTP_TIMEOUT}

@@ -66,7 +66,7 @@ type Reading struct {
 // Scanner tracks last seen values with thread-safety
 type Scanner struct {
 	lastValues map[string]int
-	mu         sync.RWMutex
+	mu         sync.Mutex
 }
 
 // NewScanner creates a new scanner
@@ -78,14 +78,12 @@ func NewScanner() *Scanner {
 
 // HasValueChanged checks if a value has changed for a device (thread-safe)
 func (sc *Scanner) HasValueChanged(addr string, value int) bool {
-	sc.mu.RLock()
-	lastVal, exists := sc.lastValues[addr]
-	sc.mu.RUnlock()
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
 
+	lastVal, exists := sc.lastValues[addr]
 	if !exists || lastVal != value {
-		sc.mu.Lock()
 		sc.lastValues[addr] = value
-		sc.mu.Unlock()
 		return true
 	}
 	return false

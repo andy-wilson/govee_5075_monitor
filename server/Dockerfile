@@ -1,4 +1,4 @@
-FROM golang:1.21-alpine3.19 AS builder
+FROM golang:1.22-alpine AS builder
 
 WORKDIR /app
 
@@ -13,13 +13,13 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN CGO_ENABLED=0 go build -o govee-server ./govee-server.go
+RUN CGO_ENABLED=0 go build -o govee-server ./govee-server.go ./storage.go ./migrate.go
 
 # Create necessary directories
 RUN mkdir -p /app/data /app/logs
 
 # Use a minimal Alpine image for the final image
-FROM alpine:3.19
+FROM alpine:3.20
 
 WORKDIR /app
 
@@ -49,5 +49,10 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
 
-# Run the application
-CMD ["/app/govee-server", "-port=${PORT}", "-log=${LOG_FILE}", "-storage=${STORAGE_DIR}", "-timeout=${CLIENT_TIMEOUT}", "-static=/app/static"]
+# Use shell form so environment variables are expanded at runtime
+CMD /app/govee-server \
+    -port=${PORT} \
+    -log=${LOG_FILE} \
+    -storage=${STORAGE_DIR} \
+    -timeout=${CLIENT_TIMEOUT} \
+    -static=/app/static

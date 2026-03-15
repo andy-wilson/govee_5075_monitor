@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -248,6 +249,7 @@ type Config struct {
 	EnableHTTPS        bool          `json:"enable_https"`
 	CertFile           string        `json:"cert_file"`
 	KeyFile            string        `json:"key_file"`
+	TrustedProxies     []*net.IPNet  // CIDR ranges of trusted reverse proxies
 }
 
 // StorageManager handles reading/writing data with partitioning and retention policies
@@ -277,6 +279,7 @@ func NewStorageManager(config *StorageConfig) *StorageManager {
 var (
 	deviceAddrRegex = regexp.MustCompile(`^[0-9A-Fa-f:]{12,17}$`)
 	deviceNameRegex = regexp.MustCompile(`^[a-zA-Z0-9 _\-\.()]+$`)
+	clientIDRegex   = regexp.MustCompile(`^[a-zA-Z0-9_\-\.]+$`)
 )
 
 // sanitizeDeviceAddr validates and sanitizes device MAC addresses to prevent path traversal
@@ -306,6 +309,20 @@ func sanitizeDeviceName(name string) (string, error) {
 	return strings.TrimSpace(name), nil
 }
 
+// sanitizeClientID validates client IDs to prevent injection via map keys or persisted JSON
+func sanitizeClientID(id string) (string, error) {
+	if len(id) == 0 {
+		return "", fmt.Errorf("client ID required")
+	}
+	if len(id) > 100 {
+		return "", fmt.Errorf("client ID too long (max 100 characters)")
+	}
+	if !clientIDRegex.MatchString(id) {
+		return "", fmt.Errorf("client ID contains invalid characters")
+	}
+	return id, nil
+}
+
 // validateReading validates sensor reading values
 func validateReading(r *Reading) error {
 	// Validate and sanitize device name to prevent XSS
@@ -327,12 +344,11 @@ func validateReading(r *Reading) error {
 	if len(r.DeviceAddr) == 0 {
 		return fmt.Errorf("device address required")
 	}
-	if len(r.ClientID) == 0 {
-		return fmt.Errorf("client ID required")
+	sanitizedClientID, err := sanitizeClientID(r.ClientID)
+	if err != nil {
+		return fmt.Errorf("invalid client ID: %v", err)
 	}
-	if len(r.ClientID) > 100 {
-		return fmt.Errorf("client ID too long")
-	}
+	r.ClientID = sanitizedClientID
 	// Timestamp should be recent (within 24 hours)
 	now := time.Now()
 	if r.Timestamp.After(now.Add(time.Hour)) {
@@ -1146,6 +1162,31 @@ func (s *Server) getDeviceStats(deviceAddr string) map[string]interface{} {
 	return stats
 }
 
+// getClientIP extracts the real client IP, only trusting X-Forwarded-For
+// from configured trusted proxy addresses to prevent IP spoofing.
+func (s *Server) getClientIP(r *http.Request) string {
+	// Strip port from RemoteAddr
+	remoteIP, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		remoteIP = r.RemoteAddr
+	}
+
+	// Only trust X-Forwarded-For if the direct connection is from a trusted proxy
+	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" && len(s.config.TrustedProxies) > 0 {
+		ip := net.ParseIP(remoteIP)
+		if ip != nil {
+			for _, cidr := range s.config.TrustedProxies {
+				if cidr.Contains(ip) {
+					// Trusted proxy: use the first (leftmost) client IP
+					return strings.TrimSpace(strings.Split(forwarded, ",")[0])
+				}
+			}
+		}
+	}
+
+	return remoteIP
+}
+
 // rateLimitMiddleware enforces rate limiting per IP address
 func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1155,11 +1196,7 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Get IP address (handle X-Forwarded-For for proxies)
-		ip := r.RemoteAddr
-		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-			ip = strings.Split(forwarded, ",")[0]
-		}
+		ip := s.getClientIP(r)
 
 		limiter := s.rateLimiter.GetLimiter(ip)
 		if !limiter.Allow() {
@@ -1172,17 +1209,41 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// gzipResponseWriter wraps http.ResponseWriter to provide gzip compression
+// gzipResponseWriter wraps http.ResponseWriter to defer gzip headers until
+// the first Write, so error responses are not incorrectly marked as gzip.
 type gzipResponseWriter struct {
-	io.Writer
 	http.ResponseWriter
+	gz          *gzip.Writer
+	wroteHeader bool
 }
 
-func (w gzipResponseWriter) Write(b []byte) (int, error) {
-	return w.Writer.Write(b)
+func (w *gzipResponseWriter) WriteHeader(code int) {
+	if code >= 400 {
+		// Error responses: don't compress, let the plain writer handle it
+		w.wroteHeader = true
+		w.ResponseWriter.WriteHeader(code)
+		return
+	}
+	w.ResponseWriter.Header().Set("Content-Encoding", "gzip")
+	w.ResponseWriter.Header().Set("Vary", "Accept-Encoding")
+	w.ResponseWriter.Header().Del("Content-Length") // Length changes with compression
+	w.wroteHeader = true
+	w.ResponseWriter.WriteHeader(code)
 }
 
-// compressionMiddleware adds gzip compression to responses
+func (w *gzipResponseWriter) Write(b []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	// If Content-Encoding was set, write through gzip; otherwise write directly
+	if w.ResponseWriter.Header().Get("Content-Encoding") == "gzip" {
+		return w.gz.Write(b)
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+// compressionMiddleware adds gzip compression to responses, deferring the
+// Content-Encoding header until the response status is known.
 func (s *Server) compressionMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Check if client accepts gzip
@@ -1191,16 +1252,10 @@ func (s *Server) compressionMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Set compression header
-		w.Header().Set("Content-Encoding", "gzip")
-		w.Header().Set("Vary", "Accept-Encoding")
-
-		// Create gzip writer
 		gz := gzip.NewWriter(w)
 		defer gz.Close()
 
-		// Wrap response writer
-		gzw := gzipResponseWriter{Writer: gz, ResponseWriter: w}
+		gzw := &gzipResponseWriter{ResponseWriter: w, gz: gz}
 		next.ServeHTTP(gzw, r)
 	})
 }
@@ -1252,10 +1307,12 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Skip authentication for GET requests to public endpoints
+		// Dashboard data is read-only sensor data and served alongside the public dashboard page
 		if r.Method == "GET" && (r.URL.Path == "/" || strings.HasPrefix(r.URL.Path, "/js/") ||
 			strings.HasPrefix(r.URL.Path, "/css/") ||
 			strings.HasPrefix(r.URL.Path, "/img/") ||
-			r.URL.Path == "/health") {
+			r.URL.Path == "/health" ||
+			r.URL.Path == "/dashboard/data") {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -1508,10 +1565,12 @@ func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if keyData.ClientID == "" {
-			http.Error(w, "Client ID is required", http.StatusBadRequest)
+		sanitizedID, err := sanitizeClientID(keyData.ClientID)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Invalid client ID: %v", err), http.StatusBadRequest)
 			return
 		}
+		keyData.ClientID = sanitizedID
 
 		// Generate a new API key
 		newKey := generateAPIKey()
@@ -1673,7 +1732,29 @@ func main() {
 	maxReadingsPerFile := flag.Int("max-file-readings", 1000, "maximum readings per file")
 	compressOldData := flag.Bool("compress", true, "compress older partitions to save space")
 
+	// Proxy flags
+	trustedProxies := flag.String("trusted-proxies", "", "comma-separated CIDR ranges of trusted reverse proxies (e.g., 10.0.0.0/8,172.16.0.0/12)")
+
 	flag.Parse()
+
+	// Parse trusted proxy CIDRs
+	var parsedProxies []*net.IPNet
+	if *trustedProxies != "" {
+		for _, cidr := range strings.Split(*trustedProxies, ",") {
+			cidr = strings.TrimSpace(cidr)
+			if cidr == "" {
+				continue
+			}
+			_, network, err := net.ParseCIDR(cidr)
+			if err != nil {
+				log.Fatalf("Invalid trusted proxy CIDR %q: %v", cidr, err)
+			}
+			parsedProxies = append(parsedProxies, network)
+		}
+		if len(parsedProxies) > 0 {
+			log.Printf("Trusted proxies configured: %s", *trustedProxies)
+		}
+	}
 
 	// Create authentication configuration
 	auth := &AuthConfig{
@@ -1716,6 +1797,7 @@ func main() {
 		EnableHTTPS:        *enableHTTPS,
 		CertFile:           *certFile,
 		KeyFile:            *keyFile,
+		TrustedProxies:     parsedProxies,
 	}
 
 	// Create storage configuration

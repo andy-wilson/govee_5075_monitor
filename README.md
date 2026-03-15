@@ -320,6 +320,33 @@ Header: X-API-Key: <admin_key>
 
 For more details, see the [Authentication Guide](docs/authentication-guide.md).
 
+## Device Aliases
+
+You can assign friendly names to devices for easier identification. Aliases appear in all API responses and the dashboard alongside the hardware device name.
+
+### Set a device alias
+
+```bash
+curl -X PUT -H "X-API-Key: YOUR_API_KEY" -H "Content-Type: application/json" \
+  -d '{"device_addr": "A4C13825A1E3", "display_name": "Kitchen Temperature"}' \
+  http://localhost:8080/api/aliases
+```
+
+### List all aliases
+
+```bash
+curl -H "X-API-Key: YOUR_API_KEY" http://localhost:8080/api/aliases
+```
+
+### Remove an alias
+
+```bash
+curl -X DELETE -H "X-API-Key: YOUR_API_KEY" \
+  "http://localhost:8080/api/aliases?device=A4C13825A1E3"
+```
+
+When an alias is set, a `display_name` field appears in device and reading responses. The dashboard will show the alias instead of the hardware name (e.g., "Kitchen Temperature" instead of "GVH5075_8F19").
+
 ## API Endpoints
 
 The server provides the following API endpoints:
@@ -333,6 +360,7 @@ The server provides the following API endpoints:
 | `/stats?device=<addr>` | GET | Get statistics for a specific device | Yes |
 | `/dashboard/data` | GET | Get all data needed for the dashboard | No |
 | `/api/keys` | GET/POST/DELETE | Manage API keys | Admin key only |
+| `/api/aliases` | GET/PUT/DELETE | Manage device friendly names | Yes |
 | `/health` | GET | Health check endpoint | No |
 
 ## Dashboard

@@ -31,6 +31,7 @@ import (
 type Reading struct {
 	DeviceName     string    `json:"device_name"`
 	DeviceAddr     string    `json:"device_addr"`
+	DisplayName    string    `json:"display_name,omitempty"`
 	TempC          float64   `json:"temp_c"`
 	TempF          float64   `json:"temp_f"`
 	TempOffset     float64   `json:"temp_offset"`
@@ -50,6 +51,7 @@ type Reading struct {
 type DeviceStatus struct {
 	DeviceName     string    `json:"device_name"`
 	DeviceAddr     string    `json:"device_addr"`
+	DisplayName    string    `json:"display_name,omitempty"`
 	TempC          float64   `json:"temp_c"`
 	TempF          float64   `json:"temp_f"`
 	TempOffset     float64   `json:"temp_offset"`
@@ -154,6 +156,8 @@ type Server struct {
 	clients map[string]*ClientStatus
 	// Stores readings for a device
 	readings map[string][]Reading
+	// Maps device address to user-assigned friendly name
+	deviceAliases map[string]string
 	// Mutex for thread safety
 	mu sync.RWMutex
 	// File logger
@@ -720,6 +724,7 @@ func NewServer(config *Config, auth *AuthConfig, storageManager *StorageManager)
 		devices:        make(map[string]*DeviceStatus),
 		clients:        make(map[string]*ClientStatus),
 		readings:       make(map[string][]Reading),
+		deviceAliases:  make(map[string]string),
 		config:         config,
 		auth:           auth,
 		storageManager: storageManager,
@@ -804,6 +809,10 @@ func (s *Server) saveData() {
 		}
 		authCopy = &ac
 	}
+	aliasesCopy := make(map[string]string, len(s.deviceAliases))
+	for k, v := range s.deviceAliases {
+		aliasesCopy[k] = v
+	}
 	s.mu.RUnlock()
 
 	// Now perform all I/O operations without holding the lock
@@ -836,6 +845,18 @@ func (s *Server) saveData() {
 		} else {
 			if err := os.WriteFile(fmt.Sprintf("%s/auth.json", s.config.StorageDir), authData, 0600); err != nil {
 				log.Printf("Failed to save auth data: %v", err)
+			}
+		}
+	}
+
+	// Save device aliases
+	if len(aliasesCopy) > 0 {
+		aliasData, err := json.MarshalIndent(aliasesCopy, "", "  ")
+		if err != nil {
+			log.Printf("Failed to marshal device aliases: %v", err)
+		} else {
+			if err := os.WriteFile(fmt.Sprintf("%s/aliases.json", s.config.StorageDir), aliasData, 0644); err != nil {
+				log.Printf("Failed to save device aliases: %v", err)
 			}
 		}
 	}
@@ -887,6 +908,16 @@ func (s *Server) loadData() {
 				s.auth.APIKeys = loadedAuth.APIKeys
 				log.Printf("Loaded %d API keys from storage", len(s.auth.APIKeys))
 			}
+		}
+	}
+
+	// Load device aliases
+	aliasData, err := os.ReadFile(fmt.Sprintf("%s/aliases.json", s.config.StorageDir))
+	if err == nil {
+		if err := json.Unmarshal(aliasData, &s.deviceAliases); err != nil {
+			log.Printf("Failed to unmarshal device aliases: %v", err)
+		} else {
+			log.Printf("Loaded %d device aliases from storage", len(s.deviceAliases))
 		}
 	}
 
@@ -1040,7 +1071,11 @@ func (s *Server) getDevices() []*DeviceStatus {
 
 	devices := make([]*DeviceStatus, 0, len(s.devices))
 	for _, device := range s.devices {
-		devices = append(devices, device)
+		d := *device // shallow copy to avoid mutating stored data
+		if alias := s.getDisplayName(d.DeviceAddr); alias != "" {
+			d.DisplayName = alias
+		}
+		devices = append(devices, &d)
 	}
 	return devices
 }
@@ -1443,6 +1478,16 @@ func (s *Server) handleReadings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Inject display name if alias is set
+		s.mu.RLock()
+		alias := s.getDisplayName(deviceAddr)
+		s.mu.RUnlock()
+		if alias != "" {
+			for i := range readings {
+				readings[i].DisplayName = alias
+			}
+		}
+
 		respondJSON(w, readings)
 
 	default:
@@ -1507,9 +1552,13 @@ func (s *Server) handleDashboardData(w http.ResponseWriter, r *http.Request) {
 		ServerStartTime: s.startTime,
 	}
 
-	// Add devices
+	// Add devices with display names
 	for _, device := range s.devices {
-		dashboardData.Devices = append(dashboardData.Devices, device)
+		d := *device
+		if alias := s.getDisplayName(d.DeviceAddr); alias != "" {
+			d.DisplayName = alias
+		}
+		dashboardData.Devices = append(dashboardData.Devices, &d)
 	}
 
 	// Add clients and count active ones
@@ -1523,7 +1572,7 @@ func (s *Server) handleDashboardData(w http.ResponseWriter, r *http.Request) {
 	}
 	dashboardData.TotalReadings = totalReadings
 
-	// Add recent readings (last 10 for each device)
+	// Add recent readings (last 10 for each device) with display names
 	for addr, readings := range s.readings {
 		if len(readings) > 0 {
 			end := len(readings)
@@ -1531,7 +1580,19 @@ func (s *Server) handleDashboardData(w http.ResponseWriter, r *http.Request) {
 			if start < 0 {
 				start = 0
 			}
-			dashboardData.RecentReadings[addr] = readings[start:end]
+			alias := s.getDisplayName(addr)
+			slice := readings[start:end]
+			if alias != "" {
+				// Copy readings to inject display name without mutating stored data
+				copied := make([]Reading, len(slice))
+				copy(copied, slice)
+				for i := range copied {
+					copied[i].DisplayName = alias
+				}
+				dashboardData.RecentReadings[addr] = copied
+			} else {
+				dashboardData.RecentReadings[addr] = slice
+			}
 		}
 	}
 
@@ -1614,6 +1675,115 @@ func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
 		} else {
 			s.mu.Unlock()
 			http.Error(w, "API key not found", http.StatusNotFound)
+		}
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// getDisplayName returns the alias for a device if set, otherwise empty string.
+// Caller must hold s.mu (read or write).
+func (s *Server) getDisplayName(deviceAddr string) string {
+	return s.deviceAliases[deviceAddr]
+}
+
+// handleDeviceAliases manages device friendly name aliases (admin only)
+func (s *Server) handleDeviceAliases(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "GET":
+		// List all aliases, or get a specific one
+		deviceAddr := r.URL.Query().Get("device")
+		s.mu.RLock()
+		if deviceAddr != "" {
+			alias, exists := s.deviceAliases[deviceAddr]
+			s.mu.RUnlock()
+			if !exists {
+				http.Error(w, "No alias set for device", http.StatusNotFound)
+				return
+			}
+			respondJSON(w, map[string]string{
+				"device_addr":  deviceAddr,
+				"display_name": alias,
+			})
+		} else {
+			// Return all aliases
+			aliases := make(map[string]string, len(s.deviceAliases))
+			for k, v := range s.deviceAliases {
+				aliases[k] = v
+			}
+			s.mu.RUnlock()
+			respondJSON(w, aliases)
+		}
+
+	case "PUT":
+		// Set or update an alias
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
+		var req struct {
+			DeviceAddr  string `json:"device_addr"`
+			DisplayName string `json:"display_name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		if req.DeviceAddr == "" {
+			http.Error(w, "device_addr is required", http.StatusBadRequest)
+			return
+		}
+
+		// Validate the display name using existing sanitization
+		if req.DisplayName == "" {
+			http.Error(w, "display_name is required", http.StatusBadRequest)
+			return
+		}
+		sanitized, err := sanitizeDeviceName(req.DisplayName)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Invalid display_name: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		s.mu.Lock()
+		s.deviceAliases[req.DeviceAddr] = sanitized
+		s.mu.Unlock()
+
+		if s.config.PersistenceEnabled {
+			s.saveData()
+		}
+
+		// Invalidate dashboard cache so the new name appears immediately
+		s.dashboardCache.Set(nil)
+
+		respondJSON(w, map[string]string{
+			"device_addr":  req.DeviceAddr,
+			"display_name": sanitized,
+		})
+
+	case "DELETE":
+		// Remove an alias
+		deviceAddr := r.URL.Query().Get("device")
+		if deviceAddr == "" {
+			http.Error(w, "Missing device parameter", http.StatusBadRequest)
+			return
+		}
+
+		s.mu.Lock()
+		if _, exists := s.deviceAliases[deviceAddr]; exists {
+			delete(s.deviceAliases, deviceAddr)
+			s.mu.Unlock()
+
+			if s.config.PersistenceEnabled {
+				s.saveData()
+			}
+
+			s.dashboardCache.Set(nil)
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("Alias deleted"))
+		} else {
+			s.mu.Unlock()
+			http.Error(w, "No alias set for device", http.StatusNotFound)
 		}
 
 	default:
@@ -1855,6 +2025,7 @@ func main() {
 	mux.Handle("/stats", compressionMiddleware(securityMiddleware(rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleStats))))))
 	mux.Handle("/dashboard/data", compressionMiddleware(securityMiddleware(rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleDashboardData))))))
 	mux.Handle("/api/keys", compressionMiddleware(securityMiddleware(rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleAPIKeys))))))
+	mux.Handle("/api/aliases", compressionMiddleware(securityMiddleware(rateLimitMiddleware(authMiddleware(http.HandlerFunc(server.handleDeviceAliases))))))
 	mux.Handle("/health", compressionMiddleware(securityMiddleware(rateLimitMiddleware(http.HandlerFunc(server.handleHealthCheck)))))
 
 	// Serve static files for dashboard (with security headers, but skip compression for pre-compressed assets)

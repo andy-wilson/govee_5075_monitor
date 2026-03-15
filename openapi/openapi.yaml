@@ -302,6 +302,114 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
                 
+  /api/aliases:
+    get:
+      summary: List device aliases
+      description: Get all device friendly name aliases, or a specific one by device address
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: device
+          in: query
+          description: Device MAC address (optional, omit to list all)
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  type: string
+                example:
+                  "A4C13825A1E3": "Kitchen Temperature"
+                  "A4C13826B2F4": "Living Room"
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    put:
+      summary: Set a device alias
+      description: Assign or update a friendly name for a device
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - device_addr
+                - display_name
+              properties:
+                device_addr:
+                  type: string
+                  description: Device MAC address
+                  example: "A4C13825A1E3"
+                display_name:
+                  type: string
+                  description: Friendly name for the device (alphanumeric, spaces, hyphens, underscores, max 100 chars)
+                  example: "Kitchen Temperature"
+      responses:
+        '200':
+          description: Alias set successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  device_addr:
+                    type: string
+                  display_name:
+                    type: string
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    delete:
+      summary: Remove a device alias
+      description: Delete the friendly name for a device
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: device
+          in: query
+          description: Device MAC address
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Alias deleted
+        '404':
+          description: No alias set for device
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /health:
     get:
       summary: Health check endpoint
@@ -345,12 +453,16 @@ components:
       properties:
         device_name:
           type: string
-          description: Name of the Govee device
+          description: Name of the Govee device (hardware name from BLE)
           example: "GVH5075_1234"
         device_addr:
           type: string
           description: MAC address of the device
           example: "A4:C1:38:25:A1:E3"
+        display_name:
+          type: string
+          description: User-assigned friendly name (only present if alias is set)
+          example: "Kitchen Temperature"
         temp_c:
           type: number
           format: float
@@ -421,12 +533,16 @@ components:
       properties:
         device_name:
           type: string
-          description: Name of the Govee device
+          description: Name of the Govee device (hardware name from BLE)
           example: "GVH5075_1234"
         device_addr:
           type: string
           description: MAC address of the device
           example: "A4:C1:38:25:A1:E3"
+        display_name:
+          type: string
+          description: User-assigned friendly name (only present if alias is set)
+          example: "Kitchen Temperature"
         temp_c:
           type: number
           format: float

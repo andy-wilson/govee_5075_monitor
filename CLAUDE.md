@@ -149,6 +149,9 @@ API keys are stored in `data/auth.json` and validated via `X-API-Key` header.
 - `GET /api/keys` - List API keys (admin only)
 - `POST /api/keys` - Create API key (admin only)
 - `DELETE /api/keys?key=<key>` - Delete API key (admin only)
+- `GET /api/aliases` - List device aliases (requires API key)
+- `PUT /api/aliases` - Set device alias (requires API key)
+- `DELETE /api/aliases?device=<addr>` - Remove device alias (requires API key)
 - `GET /health` - Health check (no auth)
 
 Full API specification: `openapi/openapi.yaml`

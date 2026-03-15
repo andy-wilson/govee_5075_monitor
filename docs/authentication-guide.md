@@ -12,15 +12,19 @@ The system implements multiple layers of security:
 2. **HTTPS/TLS Encryption** - Encrypts all data in transit between clients and the server
 3. **Input Validation** - Prevents XSS, path traversal, and injection attacks (v2.0)
 4. **Security Headers** - Comprehensive HTTP security headers (v2.0)
-5. **Rate Limiting** - Prevents abuse and DoS attacks
+5. **Rate Limiting** - Per-IP rate limiting to prevent abuse and DoS attacks
+6. **Trusted Proxy Support** - Configurable trusted proxy CIDRs for correct client IP extraction behind reverse proxies
 
 For maximum security, all features should be enabled and properly configured.
 
 ### New in v2.0
 
 - **Cryptographically Secure API Keys**: Generated using `crypto/rand` for unpredictability
-- **XSS Prevention**: Device names and inputs are validated and sanitized
+- **XSS Prevention**: Device names, client IDs, and all inputs are validated and sanitized
+- **Client ID Validation**: Client IDs must match `^[a-zA-Z0-9_\-\.]+$` (max 100 chars)
 - **Security Headers**: CSP, HSTS, X-Frame-Options, and more
+- **Trusted Proxy Support**: Only trusts `X-Forwarded-For` from configured proxy CIDRs (`-trusted-proxies` flag)
+- **Request Body Limits**: 1MB maximum request body size to prevent resource exhaustion
 - **Enhanced Health Checks**: Monitor security status via `/health` endpoint
 - **Audit Capabilities**: Better logging for security events
 
@@ -255,6 +259,27 @@ services:
    - Check firewall rules for HTTPS port
    - Try using curl with `-k` to bypass verification for testing
 
+## Trusted Proxy Configuration
+
+When running behind a reverse proxy (e.g., nginx, Caddy, Traefik), the server needs to know which proxies to trust for extracting real client IPs from `X-Forwarded-For` headers.
+
+**Without trusted proxies configured**, the server ignores `X-Forwarded-For` entirely and uses the direct connection IP for rate limiting. This is the safe default.
+
+**To enable trusted proxy support:**
+
+```bash
+# Trust a single proxy
+./govee-server -trusted-proxies=10.0.0.1/32
+
+# Trust a subnet
+./govee-server -trusted-proxies=10.0.0.0/8
+
+# Trust multiple ranges (comma-separated CIDRs)
+./govee-server -trusted-proxies=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+```
+
+**Important:** Only configure CIDRs for proxies you control. Trusting arbitrary IPs allows attackers to spoof their source IP via the `X-Forwarded-For` header, bypassing rate limits.
+
 ## Security Best Practices
 
 1. **Use both authentication and HTTPS** for defense in depth
@@ -276,7 +301,7 @@ services:
 | `/devices` | Yes | Get device information |
 | `/clients` | Yes | Get client information |
 | `/stats` | Yes | Get statistics |
-| `/dashboard/data` | Yes | Dashboard data |
+| `/dashboard/data` | No | Dashboard data (read-only, public) |
 | `/api/keys` | Admin only | Manage API keys |
 | `/health` | No | Health check endpoint |
 | `/` | No | Static dashboard files |

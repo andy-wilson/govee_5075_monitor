@@ -178,9 +178,8 @@ paths:
   /dashboard/data:
     get:
       summary: Get all data needed for the dashboard
-      description: Retrieves a combined dataset for the dashboard UI, including devices, clients, and recent readings
-      security:
-        - ApiKeyAuth: []
+      description: Retrieves a combined dataset for the dashboard UI, including devices, clients, and recent readings. No authentication required as this serves the public dashboard.
+      security: []  # No authentication required - serves public dashboard
       responses:
         '200':
           description: Successful response
@@ -188,13 +187,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DashboardData'
-        '401':
-          description: Unauthorized - API key missing or invalid
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-                
+
   /api/keys:
     get:
       summary: List all API keys
@@ -236,7 +229,9 @@ paths:
               properties:
                 client_id:
                   type: string
-                  description: Client ID to associate with the new API key
+                  description: Client ID to associate with the new API key. Must match pattern [a-zA-Z0-9_\-.]+ (max 100 chars).
+                  pattern: "^[a-zA-Z0-9_\\-.]+$"
+                  maxLength: 100
                   example: "client-kitchen"
       responses:
         '201':
@@ -416,9 +411,11 @@ components:
           example: "2023-04-13T15:30:45Z"
         client_id:
           type: string
-          description: ID of the client that sent the reading
+          description: ID of the client that sent the reading. Must match pattern [a-zA-Z0-9_\-.]+ (max 100 chars).
+          pattern: "^[a-zA-Z0-9_\\-.]+$"
+          maxLength: 100
           example: "client-livingroom"
-          
+
     DeviceStatus:
       type: object
       properties:

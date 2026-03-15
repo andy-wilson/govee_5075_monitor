@@ -443,7 +443,7 @@ func TestLoadReadings(t *testing.T) {
 	}
 
 	jsonData, _ := json.Marshal(testReadings)
-	jsonFile := filepath.Join(partitionDir, "readings_AABBCCDDEEFF.json")
+	jsonFile := filepath.Join(partitionDir, "readings_aabbccddeeff.json")
 	os.WriteFile(jsonFile, jsonData, 0644)
 
 	config := &StorageConfig{
@@ -454,7 +454,7 @@ func TestLoadReadings(t *testing.T) {
 
 	sm := NewStorageManager(config)
 
-	// Load readings with time range
+	// Load readings with time range (address is sanitized to lowercase by loadReadings)
 	fromTime := now.Add(-90 * time.Minute)
 	toTime := now.Add(1 * time.Minute)
 	loaded, err := sm.loadReadings("AABBCCDDEEFF", fromTime, toTime)

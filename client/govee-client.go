@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net/http"
@@ -92,24 +93,45 @@ func (sc *Scanner) HasValueChanged(addr string, value int) bool {
 
 // SendQueue manages worker pool for sending readings to server
 type SendQueue struct {
-	queue       chan Reading
-	wg          sync.WaitGroup
-	serverURL   string
-	apiKey      string
-	insecure    bool
-	caCertFile  string
-	httpTimeout time.Duration
+	queue      chan Reading
+	wg         sync.WaitGroup
+	serverURL  string
+	apiKey     string
+	httpClient *http.Client
 }
 
-// NewSendQueue creates a new send queue with worker pool
+// NewSendQueue creates a new send queue with worker pool and reusable HTTP client
 func NewSendQueue(workers int, serverURL, apiKey string, insecure bool, caCertFile string, httpTimeout time.Duration) *SendQueue {
+	// Build TLS config once and reuse
+	tlsConfig := &tls.Config{}
+	if insecure {
+		tlsConfig.InsecureSkipVerify = true
+	} else if caCertFile != "" {
+		caCert, err := os.ReadFile(caCertFile)
+		if err != nil {
+			log.Fatalf("Error loading CA certificate: %v", err)
+		}
+		caCertPool := x509.NewCertPool()
+		if ok := caCertPool.AppendCertsFromPEM(caCert); !ok {
+			log.Fatalf("Failed to append CA certificate")
+		}
+		tlsConfig.RootCAs = caCertPool
+	}
+
+	transport := &http.Transport{
+		TLSClientConfig: tlsConfig,
+		MaxIdleConns:    workers,
+		IdleConnTimeout: 90 * time.Second,
+	}
+
 	sq := &SendQueue{
-		queue:       make(chan Reading, 100),
-		serverURL:   serverURL,
-		apiKey:      apiKey,
-		insecure:    insecure,
-		caCertFile:  caCertFile,
-		httpTimeout: httpTimeout,
+		queue:     make(chan Reading, 100),
+		serverURL: serverURL,
+		apiKey:    apiKey,
+		httpClient: &http.Client{
+			Timeout:   httpTimeout,
+			Transport: transport,
+		},
 	}
 
 	// Start worker goroutines
@@ -146,7 +168,7 @@ func (sq *SendQueue) worker() {
 		backoff := time.Second
 
 		for attempt := 0; attempt < maxRetries; attempt++ {
-			err := sendToServer(sq.serverURL, reading, sq.apiKey, sq.insecure, sq.caCertFile, sq.httpTimeout)
+			err := sq.sendReading(reading)
 			if err == nil {
 				break
 			}
@@ -160,6 +182,39 @@ func (sq *SendQueue) worker() {
 			}
 		}
 	}
+}
+
+// sendReading sends a single reading using the shared HTTP client
+func (sq *SendQueue) sendReading(reading Reading) error {
+	jsonData, err := json.Marshal(reading)
+	if err != nil {
+		return fmt.Errorf("error marshaling JSON: %v", err)
+	}
+
+	req, err := http.NewRequest("POST", sq.serverURL, bytes.NewReader(jsonData))
+	if err != nil {
+		return fmt.Errorf("error creating HTTP request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if sq.apiKey != "" {
+		req.Header.Set("X-API-Key", sq.apiKey)
+	}
+
+	resp, err := sq.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("error sending data to server: %v", err)
+	}
+	defer resp.Body.Close()
+	// Drain body to allow connection reuse
+	io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("authentication failed: Invalid API key")
+	} else if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("server responded with status %d", resp.StatusCode)
+	}
+
+	return nil
 }
 
 func main() {
@@ -629,6 +684,8 @@ func sendToServer(serverURL string, reading Reading, apiKey string, insecureSkip
 		return fmt.Errorf("error sending data to server: %v", err)
 	}
 	defer resp.Body.Close()
+	// Drain body to allow connection reuse
+	io.Copy(io.Discard, resp.Body)
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		return fmt.Errorf("authentication failed: Invalid API key")

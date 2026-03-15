@@ -174,16 +174,46 @@ type Server struct {
 	startTime      time.Time
 }
 
-// RateLimiter tracks rate limits per IP address
+// rateLimiterEntry tracks a rate limiter with its last access time
+type rateLimiterEntry struct {
+	limiter    *rate.Limiter
+	lastAccess time.Time
+}
+
+// RateLimiter tracks rate limits per IP address with automatic cleanup
 type RateLimiter struct {
-	limiters map[string]*rate.Limiter
+	limiters map[string]*rateLimiterEntry
 	mu       sync.Mutex
 }
 
-// NewRateLimiter creates a new rate limiter
+// NewRateLimiter creates a new rate limiter with periodic cleanup
 func NewRateLimiter() *RateLimiter {
-	return &RateLimiter{
-		limiters: make(map[string]*rate.Limiter),
+	rl := &RateLimiter{
+		limiters: make(map[string]*rateLimiterEntry),
+	}
+
+	// Periodically clean up stale entries to prevent memory leaks
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			rl.cleanup(30 * time.Minute)
+		}
+	}()
+
+	return rl
+}
+
+// cleanup removes rate limiter entries that haven't been accessed recently
+func (rl *RateLimiter) cleanup(maxAge time.Duration) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	for ip, entry := range rl.limiters {
+		if now.Sub(entry.lastAccess) > maxAge {
+			delete(rl.limiters, ip)
+		}
 	}
 }
 
@@ -192,13 +222,18 @@ func (rl *RateLimiter) GetLimiter(ip string) *rate.Limiter {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
-	limiter, exists := rl.limiters[ip]
+	entry, exists := rl.limiters[ip]
 	if !exists {
-		limiter = rate.NewLimiter(10, 20) // 10 req/sec, burst 20
-		rl.limiters[ip] = limiter
+		entry = &rateLimiterEntry{
+			limiter:    rate.NewLimiter(10, 20), // 10 req/sec, burst 20
+			lastAccess: time.Now(),
+		}
+		rl.limiters[ip] = entry
+	} else {
+		entry.lastAccess = time.Now()
 	}
 
-	return limiter
+	return entry.limiter
 }
 
 // Config represents server configuration
@@ -238,11 +273,16 @@ func NewStorageManager(config *StorageConfig) *StorageManager {
 	}
 }
 
+// Pre-compiled regex patterns for validation (compiled once for efficiency)
+var (
+	deviceAddrRegex = regexp.MustCompile(`^[0-9A-Fa-f:]{12,17}$`)
+	deviceNameRegex = regexp.MustCompile(`^[a-zA-Z0-9 _\-\.()]+$`)
+)
+
 // sanitizeDeviceAddr validates and sanitizes device MAC addresses to prevent path traversal
 func sanitizeDeviceAddr(addr string) (string, error) {
 	// MAC address format: XX:XX:XX:XX:XX:XX or XXXXXXXXXXXX
-	matched, _ := regexp.MatchString(`^[0-9A-Fa-f:]{12,17}$`, addr)
-	if !matched {
+	if !deviceAddrRegex.MatchString(addr) {
 		return "", fmt.Errorf("invalid device address format")
 	}
 	// Remove colons and convert to lowercase for consistent filenames
@@ -254,8 +294,7 @@ func sanitizeDeviceAddr(addr string) (string, error) {
 func sanitizeDeviceName(name string) (string, error) {
 	// Device name should only contain alphanumeric, spaces, hyphens, underscores, and basic punctuation
 	// This prevents XSS attacks through device names
-	matched, _ := regexp.MatchString(`^[a-zA-Z0-9 _\-\.()]+$`, name)
-	if !matched {
+	if !deviceNameRegex.MatchString(name) {
 		return "", fmt.Errorf("device name contains invalid characters")
 	}
 	if len(name) == 0 {
@@ -721,22 +760,34 @@ func (s *Server) startPersistence(ctx context.Context) {
 
 // saveData saves current server state to disk (optimized to minimize lock time)
 func (s *Server) saveData() {
-	// Take snapshot under read lock (fast)
+	// Take deep snapshot under read lock to prevent data races during I/O
 	s.mu.RLock()
 	devicesCopy := make(map[string]*DeviceStatus, len(s.devices))
 	for k, v := range s.devices {
-		devicesCopy[k] = v
+		copied := *v
+		devicesCopy[k] = &copied
 	}
 	clientsCopy := make(map[string]*ClientStatus, len(s.clients))
 	for k, v := range s.clients {
-		clientsCopy[k] = v
+		copied := *v
+		clientsCopy[k] = &copied
 	}
 	readingsCopy := make(map[string][]Reading, len(s.readings))
 	for k, v := range s.readings {
-		readingsCopy[k] = v
+		sliceCopy := make([]Reading, len(v))
+		copy(sliceCopy, v)
+		readingsCopy[k] = sliceCopy
 	}
-	authCopy := s.auth
 	enableAuth := s.auth.EnableAuth
+	var authCopy *AuthConfig
+	if s.auth != nil {
+		ac := *s.auth
+		ac.APIKeys = make(map[string]string, len(s.auth.APIKeys))
+		for k, v := range s.auth.APIKeys {
+			ac.APIKeys[k] = v
+		}
+		authCopy = &ac
+	}
 	s.mu.RUnlock()
 
 	// Now perform all I/O operations without holding the lock
@@ -767,7 +818,7 @@ func (s *Server) saveData() {
 		if err != nil {
 			log.Printf("Failed to marshal auth data: %v", err)
 		} else {
-			if err := os.WriteFile(fmt.Sprintf("%s/auth.json", s.config.StorageDir), authData, 0644); err != nil {
+			if err := os.WriteFile(fmt.Sprintf("%s/auth.json", s.config.StorageDir), authData, 0600); err != nil {
 				log.Printf("Failed to save auth data: %v", err)
 			}
 		}
@@ -1240,8 +1291,8 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 		// For POST to /readings, validate client ID and preserve request body
 		if r.Method == "POST" && r.URL.Path == "/readings" {
-			// Read body once
-			bodyBytes, err := io.ReadAll(r.Body)
+			// Read body once (limited to 1MB)
+			bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 			r.Body.Close()
 			if err != nil {
 				http.Error(w, "Failed to read request body", http.StatusBadRequest)
@@ -1278,6 +1329,9 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 func (s *Server) handleReadings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "POST":
+		// Limit request body size to 1MB to prevent DoS
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+
 		// Add a new reading
 		var reading Reading
 		if err := json.NewDecoder(r.Body).Decode(&reading); err != nil {
@@ -1741,10 +1795,12 @@ func main() {
 
 		// Create HTTPS server
 		httpServer = &http.Server{
-			Addr:         fmt.Sprintf(":%d", config.Port),
-			Handler:      mux,
-			ReadTimeout:  10 * time.Second,
-			WriteTimeout: 10 * time.Second,
+			Addr:           fmt.Sprintf(":%d", config.Port),
+			Handler:        mux,
+			ReadTimeout:    10 * time.Second,
+			WriteTimeout:   10 * time.Second,
+			IdleTimeout:    120 * time.Second,
+			MaxHeaderBytes: 1 << 20, // 1MB
 			TLSConfig: &tls.Config{
 				MinVersion: tls.VersionTLS12,
 			},
@@ -1763,10 +1819,12 @@ func main() {
 	} else {
 		// Create HTTP server
 		httpServer = &http.Server{
-			Addr:         fmt.Sprintf(":%d", config.Port),
-			Handler:      mux,
-			ReadTimeout:  10 * time.Second,
-			WriteTimeout: 10 * time.Second,
+			Addr:           fmt.Sprintf(":%d", config.Port),
+			Handler:        mux,
+			ReadTimeout:    10 * time.Second,
+			WriteTimeout:   10 * time.Second,
+			IdleTimeout:    120 * time.Second,
+			MaxHeaderBytes: 1 << 20, // 1MB
 		}
 
 		// Start server in a goroutine

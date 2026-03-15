@@ -15,10 +15,9 @@ I might add support for some other models and modes of operation in time.
 ## 🚀 What's New in v2.0
 
 - **10-100x Faster Queries** - SQLite storage backend for the server (optional), with indexed queries. Replaces munging potentially thousands of JSON files
-- **Enhanced Security** - XSS fixes, security headers, proper input validation
+- **Enhanced Security** - XSS fixes, security headers, proper input validation, rate limiting, trusted proxy support
 - **Dashboard** - Faster dashboard loads with configurable cache
 - **Improved Testing** - 105 unit tests, benchmarks
-- **CI/CD Pipeline** - Automated testing, linting, security scanning
 - **Better Monitoring** - Enhanced health checks with detailed system stats
 
 ## 📖 Quick Start
@@ -88,12 +87,12 @@ The system consists of the following components:
 
 #### Server Setup
 
-1. Install Go 1.18 or later
+1. Install Go 1.22 or later
 2. Clone the repository
 3. Navigate to the server directory
 4. Build the server:
    ```bash
-   go build -o govee-server govee-server.go
+   go build -o govee-server .
    ```
 5. Run the server:
    ```bash
@@ -102,12 +101,12 @@ The system consists of the following components:
 
 #### Client Setup
 
-1. Install Go 1.18 or later and Bluetooth development libraries
+1. Install Go 1.22 or later and Bluetooth development libraries
 2. Clone the repository
 3. Navigate to the client directory
 4. Build the client:
    ```bash
-   go build -o govee-client govee-client.go
+   go build -o govee-client .
    ```
 5. Run the client:
    ```bash
@@ -212,6 +211,7 @@ The server accepts the following command-line arguments:
 | `-partition-interval` | 720h (30 days) | Interval for new data partitions |
 | `-retention` | 0 (unlimited) | How long to keep data (e.g., 8760h for 1 year) |
 | `-compress` | true | Compress older partitions to save space |
+| `-trusted-proxies` | "" | Comma-separated CIDR ranges of trusted reverse proxies (e.g., `10.0.0.0/8`) |
 
 ## Data Storage and Retention
 
@@ -331,7 +331,7 @@ The server provides the following API endpoints:
 | `/devices` | GET | Get all devices and their latest status | Yes |
 | `/clients` | GET | Get all clients and their status | Yes |
 | `/stats?device=<addr>` | GET | Get statistics for a specific device | Yes |
-| `/dashboard/data` | GET | Get all data needed for the dashboard | Yes |
+| `/dashboard/data` | GET | Get all data needed for the dashboard | No |
 | `/api/keys` | GET/POST/DELETE | Manage API keys | Admin key only |
 | `/health` | GET | Health check endpoint | No |
 

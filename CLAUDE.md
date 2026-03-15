@@ -14,11 +14,11 @@ This is a client-server system for monitoring Govee H5075 temperature and humidi
 ### Building
 
 ```bash
-# Build server
-cd server && go build -o govee-server govee-server.go
+# Build server (includes all source files)
+cd server && go build -o govee-server .
 
 # Build client
-cd client && go build -o govee-client govee-client.go
+cd client && go build -o govee-client .
 ```
 
 ### Running Locally
@@ -89,6 +89,8 @@ make benchmark
 │   └── docker-compose.yaml
 ├── server/
 │   ├── govee-server.go      # HTTP server + storage manager
+│   ├── storage.go           # SQLite storage backend
+│   ├── migrate.go           # JSON-to-SQLite migration tool
 │   ├── Dockerfile
 │   └── docker-compose.yaml
 ├── static/
@@ -111,11 +113,14 @@ make benchmark
 - Supports temperature/humidity offset calibration
 
 **server/govee-server.go**
-- Single-file HTTP server (no external web framework)
+- HTTP server (no external web framework)
 - In-memory storage with periodic disk persistence
 - Time-based data partitioning (daily/weekly/monthly directories)
 - Automatic data retention and compression
 - API key authentication with admin/client-specific/default keys
+- Rate limiting with configurable trusted proxy support
+- Input validation (device names, addresses, client IDs)
+- Gzip compression middleware
 - Serves static dashboard files
 
 **Data Storage**
@@ -140,7 +145,7 @@ API keys are stored in `data/auth.json` and validated via `X-API-Key` header.
 - `GET /devices` - List all devices with latest status
 - `GET /clients` - List all connected clients
 - `GET /stats?device=<addr>` - Get statistics for device
-- `GET /dashboard/data` - Get all data for dashboard
+- `GET /dashboard/data` - Get all data for dashboard (no auth required)
 - `GET /api/keys` - List API keys (admin only)
 - `POST /api/keys` - Create API key (admin only)
 - `DELETE /api/keys?key=<key>` - Delete API key (admin only)
@@ -207,6 +212,7 @@ See README.md for complete flag reference. Key flags:
 - `-partition-interval` (default 720h)
 - `-retention` (default 0 = unlimited)
 - `-compress` (default true)
+- `-trusted-proxies` (CIDR ranges of trusted reverse proxies, e.g. `10.0.0.0/8,172.16.0.0/12`)
 
 **Client:**
 - `-server` (default http://localhost:8080/readings)

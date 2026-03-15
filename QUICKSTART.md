@@ -318,12 +318,11 @@ curl http://localhost:8080/health | jq '.goroutines'
 
 ## Documentation
 
-- **README.md** - Complete system documentation
-- **docs/OPTIMIZATION_GUIDE.md** - Performance tuning and upgrades
-- **docs/IMPLEMENTATION_SUMMARY.md** - Technical details
-- **docs/authentication-guide.md** - Security setup
-- **CODE_REVIEW.md** - Security audit
-- **FIXES_APPLIED.md** - Changelog
+- **[README.md](README.md)** - Complete system documentation
+- **[docs/authentication-guide.md](docs/authentication-guide.md)** - Security setup
+- **[docs/data-storage-guide.md](docs/data-storage-guide.md)** - Storage, retention, partitioning
+- **[docs/metrics-guide.md](docs/metrics-guide.md)** - Enhanced environmental metrics
+- **[openapi/openapi.yaml](openapi/openapi.yaml)** - OpenAPI v3 specification
 
 ---
 
@@ -365,4 +364,4 @@ docker-compose pull                     # Update images
 
 **You're all set! Your Govee monitoring system is now running. 🎉**
 
-For advanced configuration, see [README.md](README.md) and [docs/OPTIMIZATION_GUIDE.md](docs/OPTIMIZATION_GUIDE.md).
+For advanced configuration, see [README.md](README.md) and [docs/data-storage-guide.md](docs/data-storage-guide.md).

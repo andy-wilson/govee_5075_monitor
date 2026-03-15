@@ -168,7 +168,6 @@ This will display all enhanced metrics (dew point, absolute humidity, steam pres
 
 - **Migrate to SQLite**: Get 10-100x faster queries (see [Data Storage Guide](data-storage-guide.md))
 - **Enable HTTPS**: Secure your deployment (see [Authentication Guide](authentication-guide.md))
-- **Set up CI/CD**: Automated testing and deployment (see [OPTIMIZATION_GUIDE.md](OPTIMIZATION_GUIDE.md))
 - **Add more clients**: Monitor different areas with multiple client instances
 - **Configure InfluxDB + Grafana**: Advanced data visualization and alerting
 - **Optimize Performance**: Dashboard caching and compression are enabled by default
@@ -179,4 +178,4 @@ This will display all enhanced metrics (dew point, absolute humidity, steam pres
 - **[QUICKSTART.md](../QUICKSTART.md)** - Fast 5-minute setup
 - **[docs/authentication-guide.md](authentication-guide.md)** - Security setup
 - **[docs/data-storage-guide.md](data-storage-guide.md)** - Storage backends and migration
-- **[docs/OPTIMIZATION_GUIDE.md](OPTIMIZATION_GUIDE.md)** - v2.0 performance guide
+- **[docs/metrics-guide.md](metrics-guide.md)** - Enhanced environmental metrics
